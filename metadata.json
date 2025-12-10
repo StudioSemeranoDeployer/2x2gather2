@@ -1,0 +1,5 @@
+{
+  "name": "Copy of x2gether Simulator",
+  "description": "A simulation and risk analysis tool for the 'x2gether' doubling protocol concept. Visualizes the mechanics of a queue-based payout system (Ponzi logic) to demonstrate liquidity requirements and mathematical sustainability.",
+  "requestFramePermissions": []
+}
