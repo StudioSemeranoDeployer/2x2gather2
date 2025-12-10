@@ -6,12 +6,12 @@ import { StatsChart } from './components/StatsChart';
 import { SmartContractViewer } from './components/SmartContractViewer';
 import { UserDapp } from './components/UserDapp';
 import { analyzeRisk } from './services/geminiService';
-import { Play, Pause, RefreshCw, AlertTriangle, BarChart3, Bot, TrendingUp, TrendingDown, Settings, Users, ShieldCheck, Droplets, Sliders, Trophy, Crown, Skull, Ghost, Clock, Zap, Shuffle, Coins, Layers, Activity, Globe, Flame, ShieldAlert } from 'lucide-react';
+import { Play, Pause, RefreshCw, Bot, TrendingUp, Settings, Users, ShieldCheck, Droplets, Trophy, Crown, Skull, Clock, Zap, Target, Activity, Globe, ShieldAlert } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 
 const INITIAL_SEED_AMOUNT = 1000;
 const DAILY_DRIP_INTERVAL = 240; // ~24 hours (assuming 10 ticks = 1 hour)
-const AUTO_PAUSE_TICKS = 30 * DAILY_DRIP_INTERVAL; // 30 Days
+const AUTO_PAUSE_TICKS = 36500 * DAILY_DRIP_INTERVAL; // 100 Years (Effectively Infinite)
 
 // Internal Engine State Interface (Mutable)
 interface EngineState {
@@ -25,9 +25,8 @@ interface EngineState {
   chartData: ChartDataPoint[];
   tickCount: number; // For timers
   config: SimulationConfig; // Live config syncing
-  currentRandomMultiplier: number; // Stores the current rolled value
-  currentElasticMultiplier: number; // Stores the breathing value
-  chaosModeActive: boolean; // Internal flag for random chaos bursts
+  currentAdaptiveMultiplier: number; // For Target 100 strategy
+  pendingTransactions: { amount: number; isClient: boolean; isReinvest: boolean }[]; // Queue for internal tx
 }
 
 const App: React.FC = () => {
@@ -53,31 +52,20 @@ const App: React.FC = () => {
     winnersTaxEnabled: false,
     winnersTaxFrequency: 10,  // 1 in 10
 
-    dynamicSuccessTaxEnabled: true, // New: Fee based on Mult
-    
-    randomUnluckyEnabled: false, // 10% break even risk
+    breakEvenChance: 0.0, // 0-0.5 Slider
 
     dailyDripRate: 0.10,      // 10% daily drip default
     
-    elasticMultiplierEnabled: false,
-    elasticMin: 1.2,
-    elasticMax: 2.5,
-
-    chaosModeEnabled: false,
-    
-    randomDecayEnabled: false,
-    randomDecayMin: 1.2,
-    randomDecayMax: 2.5,
-    randomDecayFrequency: 10, // Change every 10 users
+    target100Enabled: true, // New Adaptive Strategy
 
     initialReserve: 30000,     // Default 30k
     
-    taxBotEnabled: false,
-    taxBotFrequency: 100,
-    taxBotAmount: 500,
-
     jackpotFrequency: 1000,
-    jackpotAmount: 1000
+    jackpotAmount: 1000,
+
+    reinvestRate: 0.40,
+    reverseYieldRate: 0.20,
+    decayRate: 0.05
   });
 
   const [status, setStatus] = useState<SimulationStatus>(SimulationStatus.IDLE);
@@ -107,8 +95,7 @@ const App: React.FC = () => {
       protocolBalance: config.initialReserve,
       jackpotBalance: 0,
       guillotineEnabled: false,
-      elasticMultiplierEnabled: false,
-      chaosModeEnabled: false,
+      target100Enabled: false,
       winnersTaxEnabled: false,
       config: config
     },
@@ -130,7 +117,9 @@ const App: React.FC = () => {
       multiplier: 2.0,
       isTaxTarget: false,
       fastFilled: false,
-      isClientDeposit: false
+      isClientDeposit: false,
+      isReinvest: false,
+      isUnlucky: false
     }],
     historyCount: 0,
     historySum: 0,
@@ -141,9 +130,8 @@ const App: React.FC = () => {
     chartData: [],
     tickCount: 0,
     config: config,
-    currentRandomMultiplier: 2.0,
-    currentElasticMultiplier: 2.0,
-    chaosModeActive: false
+    currentAdaptiveMultiplier: 1.6, // Start Mid-Range
+    pendingTransactions: []
   });
 
   // Sync config changes to engine immediately
@@ -158,7 +146,7 @@ const App: React.FC = () => {
 
     // FILTER: Only consider deposits > configured threshold
     const candidates = [...state.queue]
-      .filter(p => !p.slashed && !p.id.startsWith('JACKPOT_BOT') && !p.id.startsWith('TAX_BOT') && p.id !== 'PROTOCOL_SEED' && p.deposit > state.config.guillotineThreshold) 
+      .filter(p => !p.slashed && !p.id.startsWith('JACKPOT_BOT') && p.id !== 'PROTOCOL_SEED' && p.deposit > state.config.guillotineThreshold) 
       .sort((a, b) => (b.target - b.collected) - (a.target - a.collected))
       .slice(0, 30); 
 
@@ -182,17 +170,36 @@ const App: React.FC = () => {
     });
   };
 
-  // Logic: Daily Drip
+  // Logic: Daily Drip (or Full Flush for Infinity Loop)
   const triggerDailyDrip = () => {
     const state = engine.current;
     if (state.protocolBalance <= 1 || state.queue.length === 0) return;
 
-    // Use configured drip rate
-    const dripAmount = state.protocolBalance * state.config.dailyDripRate;
+    const isLoop = strategy === DistributionStrategy.INFINITY_LOOP;
+    // Infinity Loop empties 100% of vault, Standard drips percentage
+    const dripAmount = isLoop ? state.protocolBalance : state.protocolBalance * state.config.dailyDripRate;
     state.protocolBalance -= dripAmount;
 
-    // Distribute dripAmount to Head (FIFO)
-    let remaining = dripAmount;
+    let headPool = dripAmount;
+    let reversePool = 0;
+
+    // Infinity Loop: Reserve 20% for Tail (Reverse Yield)
+    if (isLoop && state.queue.length > 5) {
+       reversePool = dripAmount * state.config.reverseYieldRate;
+       headPool = dripAmount - reversePool;
+    }
+
+    // 1. Distribute Reverse Pool (Tail)
+    if (reversePool > 0) {
+       const tailSlice = state.queue.slice(-10); // Last 10 users
+       if (tailSlice.length > 0) {
+          const share = reversePool / tailSlice.length;
+          tailSlice.forEach(p => p.collected += share);
+       }
+    }
+
+    // 2. Distribute Main Pool (Head - FIFO)
+    let remaining = headPool;
     for (const p of state.queue) {
       if (remaining <= 0) break;
       const needed = p.target - p.collected;
@@ -209,13 +216,12 @@ const App: React.FC = () => {
   };
 
   // Logic: Bot Injections
-  const injectBot = (type: 'JACKPOT' | 'TAX') => {
+  const injectBot = (type: 'JACKPOT') => {
     const state = engine.current;
-    const isJackpot = type === 'JACKPOT';
     
-    const deposit = isJackpot ? state.config.jackpotAmount : state.config.taxBotAmount;
+    const deposit = state.config.jackpotAmount;
     const target = deposit * 2.0;
-    const botId = isJackpot ? `JACKPOT_BOT_${state.historyCount}` : `TAX_BOT_${state.historyCount}`;
+    const botId = `JACKPOT_BOT_${state.historyCount}`;
     
     const bot: Player = {
       id: botId,
@@ -229,7 +235,8 @@ const App: React.FC = () => {
       isTaxTarget: false,
       fastFilled: false,
       isClientDeposit: false,
-      isUnlucky: false // Bots are never unlucky
+      isUnlucky: false,
+      isReinvest: false
     };
     
     state.totalDeposited += deposit;
@@ -237,27 +244,26 @@ const App: React.FC = () => {
   };
 
   // Helper: Process a single deposit logic
-  const processDeposit = (amount: number, isSystem: boolean = false, isClient: boolean = false) => {
+  // Removed recursive calls - adds to pending queue instead
+  const processDeposit = (amount: number, isSystem: boolean = false, isClient: boolean = false, isReinvest: boolean = false, advanceTime: boolean = true) => {
     const state = engine.current;
-    state.tickCount++;
     
-    // --- TIMED EVENTS ---
-    if (guillotineEnabled && state.tickCount % state.config.guillotineInterval === 0) {
-      triggerGuillotine();
-    }
-    if (state.tickCount % DAILY_DRIP_INTERVAL === 0) {
-      triggerDailyDrip();
+    // Only primary deposits tick the clock
+    if (advanceTime) {
+      state.tickCount++;
+      
+      // --- TIMED EVENTS ---
+      if (guillotineEnabled && state.tickCount % state.config.guillotineInterval === 0) {
+        triggerGuillotine();
+      }
+      if (state.tickCount % DAILY_DRIP_INTERVAL === 0) {
+        triggerDailyDrip();
+      }
     }
     
-    // CHAOS MODE Ticker
-    if (state.config.chaosModeEnabled && state.tickCount % 50 === 0) {
-        // Toggle chaos state randomly
-        state.chaosModeActive = Math.random() > 0.5;
-    }
-
-    // 1. Take Fee (if not system)
+    // 1. Take Fee (if not system & not reinvest)
     let netAmount = amount;
-    if (!isSystem) {
+    if (!isSystem && !isReinvest) {
       const fee = amount * state.config.feePercent;
       const actualFee = Math.max(1, fee); 
       netAmount = amount - actualFee;
@@ -275,59 +281,36 @@ const App: React.FC = () => {
       headPool = netAmount * 0.80;  
     }
 
-    // 3. Multiplier Calculation
+    // 3. Multiplier Calculation (Target 100 Adaptive)
     let effectiveMultiplier = multiplier;
 
-    if (state.config.chaosModeEnabled && state.chaosModeActive) {
-        // CHAOS: Randomly spike or drop
-        const range = state.config.randomDecayMax - state.config.randomDecayMin;
-        effectiveMultiplier = state.config.randomDecayMin + (Math.random() * range);
-    } 
-    else if (state.config.elasticMultiplierEnabled) {
-        // ELASTIC STRATEGY
-        const qLen = state.queue.length;
-        let trend = 0;
+    if (state.config.target100Enabled) {
+        const targetQ = 100;
+        const currentQ = state.queue.length;
         
-        // Attraction Phase: Queue Short -> Increase ROI
-        if (qLen < 20) {
-            trend = 0.05; 
-        } 
-        // Protection Phase: Queue Long -> Decrease ROI
-        else if (qLen > 50) {
-            trend = -0.05;
+        // Drifting Logic: +0.02 if Q<100, -0.02 if Q>100 (More sensitive)
+        if (currentQ < targetQ) {
+            state.currentAdaptiveMultiplier += 0.02;
+        } else {
+            state.currentAdaptiveMultiplier -= 0.02;
         }
 
-        // Apply Trend smoothly
-        state.currentElasticMultiplier += trend;
-        
-        // Clamp
-        if (state.currentElasticMultiplier > state.config.elasticMax) state.currentElasticMultiplier = state.config.elasticMax;
-        if (state.currentElasticMultiplier < state.config.elasticMin) state.currentElasticMultiplier = state.config.elasticMin;
-        
-        effectiveMultiplier = state.currentElasticMultiplier;
-    }
-    else if (state.config.randomDecayEnabled && !isSystem) {
-       // RANDOM LEGACY
-       const totalUsers = state.historyCount + state.queue.length;
-       if (totalUsers > 0 && totalUsers % state.config.randomDecayFrequency === 0) {
-          const range = state.config.randomDecayMax - state.config.randomDecayMin;
-          state.currentRandomMultiplier = state.config.randomDecayMin + (Math.random() * range);
-       }
-       if (state.currentRandomMultiplier === 0) state.currentRandomMultiplier = multiplier;
-       effectiveMultiplier = state.currentRandomMultiplier;
+        // Clamp between 1.2 and 2.0 (as requested)
+        state.currentAdaptiveMultiplier = Math.max(1.2, Math.min(2.0, state.currentAdaptiveMultiplier));
+        effectiveMultiplier = state.currentAdaptiveMultiplier;
     }
 
-    // 4. "Unlucky 10%" Risk Check (Never Less)
+    // 4. Break-Even Risk Check (Slider Probability)
     let isUnlucky = false;
-    if (state.config.randomUnluckyEnabled && !isSystem) {
-        // 10% Chance
-        if (Math.random() < 0.10) {
+    // Apply risk only to non-system, non-reinvest users
+    if (!isSystem && !isReinvest) {
+        if (Math.random() < state.config.breakEvenChance) {
             isUnlucky = true;
             effectiveMultiplier = 1.0; // Force break-even
         }
     }
 
-    // 5. Winners Tax Flagging (1 in X users) - Legacy setting override by Dynamic
+    // 5. Winners Tax Flagging (1 in X users)
     const currentTotalUsers = state.historyCount + state.queue.length + 1;
     const isTaxTarget = winnersTaxEnabled && !isSystem && (currentTotalUsers % state.config.winnersTaxFrequency === 0);
 
@@ -344,7 +327,8 @@ const App: React.FC = () => {
       isTaxTarget: isTaxTarget,
       fastFilled: false,
       isClientDeposit: isClient,
-      isUnlucky: isUnlucky
+      isUnlucky: isUnlucky,
+      isReinvest: isReinvest
     };
 
     // 7. Distribute Yield (Drip)
@@ -377,14 +361,9 @@ const App: React.FC = () => {
     // --- CHECK FOR BOT INJECTIONS ---
     const totalUsers = state.historyCount + state.queue.length;
     
-    // Jackpot Bot (Configurable)
+    // Jackpot Bot
     if (totalUsers > 0 && totalUsers % state.config.jackpotFrequency === 0) {
       injectBot('JACKPOT');
-    }
-
-    // Tax Bot (Configurable)
-    if (state.config.taxBotEnabled && totalUsers > 0 && totalUsers % state.config.taxBotFrequency === 0) {
-      injectBot('TAX');
     }
 
     // 10. Cleanup Sweep (Remove fully paid)
@@ -400,22 +379,26 @@ const App: React.FC = () => {
             state.protocolBalance += p.collected;
         } else if (p.id.startsWith('JACKPOT_BOT')) {
             state.jackpotBalance += profit;
-        } else if (p.id.startsWith('TAX_BOT')) {
-            state.protocolBalance += profit; // Tax Bot profit goes to Reserve
         } else {
-            // DYNAMIC SUCCESS TAX: Fee based on Multiplier
-            if (state.config.dynamicSuccessTaxEnabled && !p.isUnlucky) {
-                // If lucky/normal, pay tax on profit
-                const taxRate = Math.max(0, (p.multiplier - 1.0) * 0.10);
-                const taxAmount = profit * taxRate;
-                state.protocolBalance += taxAmount;
-            } 
-            // Legacy Tax Fallback
-            else if (p.isTaxTarget && !p.isUnlucky) {
+            // Legacy Tax Logic (Still valid if enabled via other means in future)
+            if (p.isTaxTarget && !p.isUnlucky) {
                if (profit > 0) {
-                 const tax = profit * 0.20; // Fixed 20% legacy
+                 const tax = profit * 0.20; 
                  state.protocolBalance += tax;
                }
+            }
+            
+            // INFINITY LOOP: Mandatory Reinvest logic
+            // We DO NOT call processDeposit here. We push to pending.
+            if (strategy === DistributionStrategy.INFINITY_LOOP && !p.isUnlucky && !p.id.startsWith('JACKPOT_BOT')) {
+                 const reinvestAmt = p.collected * state.config.reinvestRate;
+                 if (reinvestAmt > 5) { // Minimum threshold
+                     state.pendingTransactions.push({ 
+                        amount: reinvestAmt, 
+                        isClient: p.isClientDeposit || false,
+                        isReinvest: true
+                     });
+                 }
             }
         }
         // --------------------------
@@ -429,9 +412,10 @@ const App: React.FC = () => {
         nextQueue.push(p);
       }
     }
+    
     state.queue = nextQueue;
     state.currentRound++; 
-
+    
     // 11. Update Chart Data
     const liability = state.queue.reduce((acc, p) => acc + (p.target - p.collected), 0);
     state.chartData.push({
@@ -457,7 +441,8 @@ const App: React.FC = () => {
         isTaxTarget: false,
         fastFilled: false,
         isClientDeposit: false,
-        isUnlucky: false
+        isUnlucky: false,
+        isReinvest: false
       }],
       historyCount: 0,
       historySum: 0,
@@ -468,9 +453,8 @@ const App: React.FC = () => {
       chartData: [],
       tickCount: 0,
       config: config,
-      currentRandomMultiplier: 2.0,
-      currentElasticMultiplier: 2.0,
-      chaosModeActive: false
+      currentAdaptiveMultiplier: 1.6,
+      pendingTransactions: []
     };
     syncUI();
   };
@@ -481,12 +465,8 @@ const App: React.FC = () => {
     
     // Determine effective multiplier for display purposes
     let effectiveDisplayMultiplier = multiplier;
-    if (state.config.chaosModeEnabled && state.chaosModeActive) {
-        effectiveDisplayMultiplier = state.currentElasticMultiplier; // Just show one state
-    } else if (state.config.elasticMultiplierEnabled) {
-        effectiveDisplayMultiplier = state.currentElasticMultiplier;
-    } else if (state.config.randomDecayEnabled) {
-        effectiveDisplayMultiplier = state.currentRandomMultiplier;
+    if (state.config.target100Enabled) {
+        effectiveDisplayMultiplier = state.currentAdaptiveMultiplier;
     }
 
     setUiSnapshot({
@@ -505,8 +485,7 @@ const App: React.FC = () => {
         protocolBalance: state.protocolBalance,
         jackpotBalance: state.jackpotBalance,
         guillotineEnabled,
-        elasticMultiplierEnabled: state.config.elasticMultiplierEnabled,
-        chaosModeEnabled: state.config.chaosModeEnabled,
+        target100Enabled: state.config.target100Enabled,
         winnersTaxEnabled,
         config: state.config,
         isAutoPaused: state.tickCount >= AUTO_PAUSE_TICKS
@@ -522,30 +501,43 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [syncUI]);
 
+  // --- Simulation Loop ---
   useEffect(() => {
     if (status !== SimulationStatus.RUNNING) return;
     
     const timer = setInterval(() => {
-      // --- AUTO PAUSE CHECK ---
+      // 0. Auto Pause Check
       if (engine.current.tickCount >= AUTO_PAUSE_TICKS) {
         setStatus(SimulationStatus.COMPLETED);
         return;
       }
 
+      // 1. Process Pending Internal Transactions (Reinvests)
+      // We process these first. They do NOT advance time.
+      const pending = [...engine.current.pendingTransactions];
+      engine.current.pendingTransactions = []; // Clear queue
+      
+      pending.forEach(tx => {
+         processDeposit(tx.amount, false, tx.isClient, tx.isReinvest, false);
+      });
+
+      // 2. Process Primary Deposit (Advances Time)
+      // Simulates real-world traffic
       const amount = Math.floor(Math.random() * 990) + 10; 
-      processDeposit(amount);
+      processDeposit(amount, false, false, false, true); 
+
     }, 100); 
 
     return () => clearInterval(timer);
   }, [status, strategy, multiplier, guillotineEnabled, winnersTaxEnabled]);
 
   const handleManualDeposit = () => {
-    processDeposit(manualDepositAmount);
+    processDeposit(manualDepositAmount, false, false, false, true);
     syncUI();
   };
 
   const handleDappDeposit = (amt: number) => {
-    processDeposit(amt, false, true); // true for isClient
+    processDeposit(amt, false, true, false, true); // true for isClient, advanceTime = true
     syncUI();
   };
 
@@ -557,9 +549,8 @@ const App: React.FC = () => {
     setIsAnalyzing(true);
     const concept = `
       Protocol with ${uiSnapshot.stats.multiplier.toFixed(2)}x Current Multiplier.
-      Elastic Strategy: ${config.elasticMultiplierEnabled}.
-      Chaos Mode: ${config.chaosModeEnabled}.
-      Dynamic Success Fee: ON.
+      Target 100 Adaptive Strategy: ${config.target100Enabled}.
+      Break-Even Risk: ${config.breakEvenChance * 100}%.
       Reserve: ${uiSnapshot.stats.protocolBalance.toFixed(2)}.
     `;
     const result = await analyzeRisk(uiSnapshot.stats, concept);
@@ -590,7 +581,7 @@ const App: React.FC = () => {
                 x2gether <span className="text-emerald-500">Protocol</span>
               </h1>
               <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
-                <span className="bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-400 font-mono">v6.0-ELASTIC</span>
+                <span className="bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-400 font-mono">v7.0-TARGET100</span>
                 <span>•</span>
                 <span className="flex items-center gap-1"><ShieldCheck className="w-3 h-3 text-blue-500"/> Audited Simulation</span>
               </div>
@@ -679,15 +670,11 @@ const App: React.FC = () => {
                    </button>
                    <button onClick={() => setSettingsTab('economy')} className={`relative flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${settingsTab === 'economy' ? 'text-white border-b-2 border-emerald-500 bg-slate-800' : 'text-slate-500 hover:text-slate-300'}`}>
                       Econ 
-                      {(config.elasticMultiplierEnabled || config.chaosModeEnabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>}
-                   </button>
-                   <button onClick={() => setSettingsTab('bots')} className={`relative flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${settingsTab === 'bots' ? 'text-white border-b-2 border-emerald-500 bg-slate-800' : 'text-slate-500 hover:text-slate-300'}`}>
-                      Bots
-                      {(config.taxBotEnabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-purple-500 rounded-full"></span>}
+                      {(config.target100Enabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-cyan-500 rounded-full"></span>}
                    </button>
                    <button onClick={() => setSettingsTab('risks')} className={`relative flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${settingsTab === 'risks' ? 'text-white border-b-2 border-emerald-500 bg-slate-800' : 'text-slate-500 hover:text-slate-300'}`}>
                       Risks
-                      {(guillotineEnabled || winnersTaxEnabled || config.randomUnluckyEnabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full"></span>}
+                      {(guillotineEnabled || config.breakEvenChance > 0) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full"></span>}
                    </button>
                 </div>
 
@@ -711,17 +698,20 @@ const App: React.FC = () => {
                              className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500 hover:accent-emerald-400"
                           />
                        </div>
-
-                       <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-800">
-                         <label className="flex justify-between text-xs text-slate-400 mb-2 uppercase font-bold">
-                           Entry Fee <span className="text-white font-mono">{(config.feePercent * 100).toFixed(1)}%</span>
-                         </label>
-                         <input 
-                           type="range" min="0" max="10" step="0.5"
-                           value={config.feePercent * 100}
-                           onChange={(e) => setConfig({...config, feePercent: parseFloat(e.target.value) / 100})}
-                           className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-slate-500"
-                         />
+                       
+                       {/* Distribution Strategy Loop */}
+                       <div className="p-4 rounded-xl border bg-slate-950/50 border-slate-800">
+                           <div className="flex items-center justify-between mb-3">
+                              <span className="text-xs font-bold uppercase text-slate-400">Infinity Loop</span>
+                              <button onClick={() => setStrategy(strategy === DistributionStrategy.INFINITY_LOOP ? DistributionStrategy.STANDARD : DistributionStrategy.INFINITY_LOOP)} className={`w-9 h-5 rounded-full relative transition-colors ${strategy === DistributionStrategy.INFINITY_LOOP ? 'bg-emerald-600' : 'bg-slate-700'}`}>
+                                 <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: strategy === DistributionStrategy.INFINITY_LOOP ? '20px' : '4px'}}></div>
+                              </button>
+                           </div>
+                           {strategy === DistributionStrategy.INFINITY_LOOP && (
+                              <div className="text-[10px] text-emerald-400 pt-2 border-t border-slate-800">
+                                 100% daily flush. 40% mandatory reinvest.
+                              </div>
+                           )}
                        </div>
 
                        <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-800">
@@ -742,150 +732,72 @@ const App: React.FC = () => {
                   {settingsTab === 'economy' && (
                     <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
                        
-                       {/* Chaos Mode */}
-                       <div className={`p-4 rounded-xl border transition-all ${config.chaosModeEnabled ? 'bg-pink-950/20 border-pink-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
+                       {/* Target 100 Strategy */}
+                       <div className={`p-4 rounded-xl border transition-all ${config.target100Enabled ? 'bg-cyan-950/20 border-cyan-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
                           <div className="flex items-center justify-between mb-3">
                              <div className="flex items-center gap-2">
-                                <Flame className={`w-4 h-4 ${config.chaosModeEnabled ? 'text-pink-400' : 'text-slate-500'}`} />
-                                <span className={`text-xs font-bold uppercase ${config.chaosModeEnabled ? 'text-pink-400' : 'text-slate-500'}`}>Chaos Mode</span>
+                                <Target className={`w-4 h-4 ${config.target100Enabled ? 'text-cyan-400' : 'text-slate-500'}`} />
+                                <span className={`text-xs font-bold uppercase ${config.target100Enabled ? 'text-cyan-400' : 'text-slate-500'}`}>Target 100 Strategy</span>
                              </div>
                              <button 
-                               onClick={() => setConfig({...config, chaosModeEnabled: !config.chaosModeEnabled})}
-                               className={`w-9 h-5 rounded-full relative transition-colors ${config.chaosModeEnabled ? 'bg-pink-600' : 'bg-slate-700'}`}
+                               onClick={() => setConfig({...config, target100Enabled: !config.target100Enabled})}
+                               className={`w-9 h-5 rounded-full relative transition-colors ${config.target100Enabled ? 'bg-cyan-600' : 'bg-slate-700'}`}
                              >
-                               <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.chaosModeEnabled ? '20px' : '4px'}}></div>
-                             </button>
-                          </div>
-                          {config.chaosModeEnabled && <p className="text-[10px] text-pink-300 italic">Randomly blending Elastic & Random strategies.</p>}
-                       </div>
-
-                       {/* Elastic Multiplier */}
-                       <div className={`p-4 rounded-xl border transition-all ${config.elasticMultiplierEnabled ? 'bg-cyan-950/20 border-cyan-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
-                          <div className="flex items-center justify-between mb-3">
-                             <div className="flex items-center gap-2">
-                                <Activity className={`w-4 h-4 ${config.elasticMultiplierEnabled ? 'text-cyan-400' : 'text-slate-500'}`} />
-                                <span className={`text-xs font-bold uppercase ${config.elasticMultiplierEnabled ? 'text-cyan-400' : 'text-slate-500'}`}>Elastic Multiplier</span>
-                             </div>
-                             <button 
-                               onClick={() => setConfig({...config, elasticMultiplierEnabled: !config.elasticMultiplierEnabled})}
-                               className={`w-9 h-5 rounded-full relative transition-colors ${config.elasticMultiplierEnabled ? 'bg-cyan-600' : 'bg-slate-700'}`}
-                             >
-                               <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.elasticMultiplierEnabled ? '20px' : '4px'}}></div>
+                               <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.target100Enabled ? '20px' : '4px'}}></div>
                              </button>
                           </div>
                           
-                          {config.elasticMultiplierEnabled && (
-                            <div className="space-y-4 pt-2 border-t border-cyan-900/30 mt-2">
-                               <div className="flex gap-2">
-                                 <div className="flex-1">
-                                    <div className="text-[9px] text-slate-500 mb-1 uppercase">Min Breathing</div>
-                                    <input type="number" step="0.1" value={config.elasticMin} onChange={(e) => setConfig({...config, elasticMin: parseFloat(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-xs text-center font-mono" />
-                                 </div>
-                                 <div className="flex-1">
-                                    <div className="text-[9px] text-slate-500 mb-1 uppercase">Max Breathing</div>
-                                    <input type="number" step="0.1" value={config.elasticMax} onChange={(e) => setConfig({...config, elasticMax: parseFloat(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-xs text-center font-mono" />
-                                 </div>
-                               </div>
-                               <div className="text-[10px] text-cyan-300 italic">Adapts to queue length automatically.</div>
+                          {config.target100Enabled && (
+                            <div className="text-[10px] text-cyan-300 pt-2 border-t border-cyan-900/30 mt-2">
+                               System adaptively adjusts ROI between 1.2x and 2.0x to maintain ~100 users queue length.
                             </div>
                           )}
                        </div>
 
-                       {/* Legacy Controls (Hidden if Elastic or Chaos on) */}
-                       {!config.elasticMultiplierEnabled && !config.chaosModeEnabled && (
-                          <div className="opacity-70 grayscale">
-                            <div className="p-4 rounded-xl border border-slate-800 bg-slate-950/50 mb-4">
-                               <label className="flex justify-between text-xs text-slate-400 mb-2 uppercase font-bold">
-                                 Fixed Multiplier <span className="text-white font-mono">{multiplier}x</span>
-                               </label>
-                               <input 
-                                 type="range" min="1.1" max="3.0" step="0.1"
-                                 value={multiplier}
-                                 onChange={(e) => { setMultiplier(parseFloat(e.target.value)); handleFullReset(); }}
-                                 className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-white"
-                               />
-                            </div>
-                            <div className="text-[10px] text-center text-slate-600">Enable Elastic or Chaos for advanced strategies</div>
+                       {/* Legacy Controls (Hidden if Target 100 is on) */}
+                       {!config.target100Enabled && (
+                          <div className="p-4 rounded-xl border border-slate-800 bg-slate-950/50 mb-4">
+                             <label className="flex justify-between text-xs text-slate-400 mb-2 uppercase font-bold">
+                               Fixed Multiplier <span className="text-white font-mono">{multiplier}x</span>
+                             </label>
+                             <input 
+                               type="range" min="1.1" max="3.0" step="0.1"
+                               value={multiplier}
+                               onChange={(e) => { setMultiplier(parseFloat(e.target.value)); handleFullReset(); }}
+                               className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-white"
+                             />
                           </div>
                        )}
 
                     </div>
                   )}
 
-                  {/* BOTS TAB */}
-                  {settingsTab === 'bots' && (
-                     <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                        {/* Jackpot Bot */}
-                        <div className="p-4 rounded-xl border border-amber-900/30 bg-amber-950/10">
-                           <h3 className="text-xs font-bold text-amber-500 mb-3 flex items-center gap-2 uppercase">
-                              <Zap className="w-4 h-4" /> Jackpot Injection
-                           </h3>
-                           <div className="space-y-4">
-                              <div>
-                                 <label className="flex justify-between text-[10px] text-slate-500 mb-1 uppercase">Frequency (Every X Users)</label>
-                                 <div className="flex items-center gap-2">
-                                    <input type="range" min="100" max="2000" step="100" value={config.jackpotFrequency} onChange={(e) => setConfig({...config, jackpotFrequency: parseInt(e.target.value)})} className="flex-1 h-1 bg-slate-800 rounded accent-amber-500" />
-                                    <span className="text-amber-400 font-mono text-xs w-12 text-right">{config.jackpotFrequency}</span>
-                                 </div>
-                              </div>
-                              <div>
-                                 <label className="flex justify-between text-[10px] text-slate-500 mb-1 uppercase">Bot Amount ($)</label>
-                                 <div className="flex items-center gap-2">
-                                    <input type="range" min="100" max="5000" step="100" value={config.jackpotAmount} onChange={(e) => setConfig({...config, jackpotAmount: parseInt(e.target.value)})} className="flex-1 h-1 bg-slate-800 rounded accent-amber-500" />
-                                    <span className="text-amber-400 font-mono text-xs w-12 text-right">${config.jackpotAmount}</span>
-                                 </div>
-                              </div>
-                           </div>
-                        </div>
-
-                        {/* Tax Bot */}
-                        <div className={`p-4 rounded-xl border transition-all ${config.taxBotEnabled ? 'bg-purple-950/20 border-purple-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
-                           <div className="flex items-center justify-between mb-3">
-                              <div className="flex items-center gap-2">
-                                 <Ghost className={`w-4 h-4 ${config.taxBotEnabled ? 'text-purple-400' : 'text-slate-500'}`} />
-                                 <span className={`text-xs font-bold uppercase ${config.taxBotEnabled ? 'text-purple-400' : 'text-slate-500'}`}>System Drain Bot</span>
-                              </div>
-                              <button onClick={() => setConfig({...config, taxBotEnabled: !config.taxBotEnabled})} className={`w-9 h-5 rounded-full relative transition-colors ${config.taxBotEnabled ? 'bg-purple-600' : 'bg-slate-700'}`}>
-                                 <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.taxBotEnabled ? '20px' : '4px'}}></div>
-                              </button>
-                           </div>
-                           
-                           {config.taxBotEnabled && (
-                              <div className="space-y-3 pt-2 border-t border-purple-900/30">
-                                 <div>
-                                    <div className="flex justify-between text-[9px] text-slate-500 mb-1 uppercase">Frequency (Users)</div>
-                                    <input type="range" min="10" max="500" step="10" value={config.taxBotFrequency} onChange={(e) => setConfig({...config, taxBotFrequency: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded accent-purple-500" />
-                                 </div>
-                                 <div>
-                                    <div className="flex justify-between text-[9px] text-slate-500 mb-1 uppercase">Amount ($)</div>
-                                    <input type="range" min="100" max="5000" step="100" value={config.taxBotAmount} onChange={(e) => setConfig({...config, taxBotAmount: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded accent-purple-500" />
-                                 </div>
-                              </div>
-                           )}
-                        </div>
-                     </div>
-                  )}
-
                   {/* RISKS TAB */}
                   {settingsTab === 'risks' && (
                      <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
                         
-                        {/* 10% Unlucky Risk */}
-                        <div className={`p-4 rounded-xl border transition-all ${config.randomUnluckyEnabled ? 'bg-slate-100/10 border-slate-400/40' : 'bg-slate-950/50 border-slate-800'}`}>
+                        {/* Break-Even Risk Slider */}
+                        <div className={`p-4 rounded-xl border transition-all ${config.breakEvenChance > 0 ? 'bg-slate-100/10 border-slate-400/40' : 'bg-slate-950/50 border-slate-800'}`}>
                            <div className="flex items-center justify-between mb-3">
                               <div className="flex items-center gap-2">
-                                 <ShieldAlert className={`w-4 h-4 ${config.randomUnluckyEnabled ? 'text-slate-200' : 'text-slate-500'}`} />
-                                 <span className={`text-xs font-bold uppercase ${config.randomUnluckyEnabled ? 'text-slate-200' : 'text-slate-500'}`}>10% Break-Even Risk</span>
+                                 <ShieldAlert className={`w-4 h-4 ${config.breakEvenChance > 0 ? 'text-slate-200' : 'text-slate-500'}`} />
+                                 <span className={`text-xs font-bold uppercase ${config.breakEvenChance > 0 ? 'text-slate-200' : 'text-slate-500'}`}>Break-Even Risk %</span>
                               </div>
-                              <button onClick={() => setConfig({...config, randomUnluckyEnabled: !config.randomUnluckyEnabled})} className={`w-9 h-5 rounded-full relative transition-colors ${config.randomUnluckyEnabled ? 'bg-slate-200' : 'bg-slate-700'}`}>
-                                 <div className={`absolute top-1 w-3 h-3 bg-slate-900 rounded-full transition-transform`} style={{left: config.randomUnluckyEnabled ? '20px' : '4px'}}></div>
-                              </button>
                            </div>
-                           {config.randomUnluckyEnabled && (
-                              <div className="text-[10px] text-slate-400 pt-2 border-t border-slate-700/50">
-                                 10% of new users randomly get a 1.0x multiplier (Break Even Only).
-                              </div>
-                           )}
+                           
+                           <div className="space-y-2">
+                               <div className="flex justify-between text-[10px] text-slate-400">
+                                  <span>Probability</span>
+                                  <span className="text-white font-mono">{(config.breakEvenChance * 100).toFixed(0)}%</span>
+                               </div>
+                               <input 
+                                 type="range" min="0" max="50" step="1"
+                                 value={config.breakEvenChance * 100}
+                                 onChange={(e) => setConfig({...config, breakEvenChance: parseFloat(e.target.value) / 100})}
+                                 className="w-full h-1 bg-slate-800 rounded accent-slate-200"
+                               />
+                               <div className="text-[9px] text-slate-500 italic">Chance of receiving 1.0x (Refund Only).</div>
+                           </div>
                         </div>
 
                         {/* Guillotine */}
@@ -920,21 +832,6 @@ const App: React.FC = () => {
                            )}
                         </div>
 
-                        {/* Winners Tax */}
-                        <div className={`p-4 rounded-xl border transition-all ${config.dynamicSuccessTaxEnabled ? 'bg-blue-950/20 border-blue-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
-                           <div className="flex items-center justify-between mb-3">
-                              <div className="flex items-center gap-2">
-                                 <Crown className={`w-4 h-4 ${config.dynamicSuccessTaxEnabled ? 'text-blue-400' : 'text-slate-500'}`} />
-                                 <span className={`text-xs font-bold uppercase ${config.dynamicSuccessTaxEnabled ? 'text-blue-400' : 'text-slate-500'}`}>Dynamic Success Tax</span>
-                              </div>
-                              <button onClick={() => setConfig({...config, dynamicSuccessTaxEnabled: !config.dynamicSuccessTaxEnabled})} className={`w-9 h-5 rounded-full relative transition-colors ${config.dynamicSuccessTaxEnabled ? 'bg-blue-600' : 'bg-slate-700'}`}>
-                                 <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.dynamicSuccessTaxEnabled ? '20px' : '4px'}}></div>
-                              </button>
-                           </div>
-                           <div className="text-[10px] text-slate-400">
-                             Fee calculated based on Multiplier: <span className="text-blue-300 font-mono">(Mult - 1) * 10%</span>
-                           </div>
-                        </div>
                      </div>
                   )}
 
@@ -944,7 +841,7 @@ const App: React.FC = () => {
                 <div className="p-4 border-t border-slate-800 bg-slate-950">
                    <div className="flex gap-2 mb-2">
                       <button onClick={handleManualDeposit} disabled={status === SimulationStatus.COMPLETED} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white p-3 rounded-xl text-sm font-bold border border-slate-700 transition-all active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2">
-                         <Coins className="w-4 h-4" /> Deposit
+                         <Settings className="w-4 h-4" /> Deposit
                       </button>
                       <button onClick={() => status !== SimulationStatus.COMPLETED && setStatus(status === SimulationStatus.RUNNING ? SimulationStatus.PAUSED : SimulationStatus.RUNNING)} disabled={status === SimulationStatus.COMPLETED} className={`flex-1 p-3 rounded-xl text-sm font-bold border transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50 ${status === SimulationStatus.RUNNING ? 'bg-amber-500/10 text-amber-500 border-amber-500/50' : 'bg-emerald-600 text-white border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.3)]'}`}>
                          {status === SimulationStatus.RUNNING ? <><Pause className="w-4 h-4" /> Pause</> : <><Play className="w-4 h-4" /> Auto Run</>}
@@ -968,7 +865,7 @@ const App: React.FC = () => {
                           <Clock className="w-12 h-12 text-emerald-500" />
                        </div>
                        <h3 className="text-2xl font-bold text-white mb-2">Cycle Complete</h3>
-                       <p className="text-sm text-slate-400 mb-6">Max duration of 30 days reached.</p>
+                       <p className="text-sm text-slate-400 mb-6">Max duration reached.</p>
                        <button onClick={handleFullReset} className="px-6 py-3 bg-emerald-600 rounded-xl text-sm font-bold text-white hover:bg-emerald-500 shadow-lg shadow-emerald-900/20 transition-all transform hover:scale-105">
                           Start New Cycle
                        </button>
@@ -996,7 +893,7 @@ const App: React.FC = () => {
                           <div>
                             <div className="text-[10px] text-slate-500 uppercase tracking-wider font-bold mb-1">Paying Out</div>
                             <div className="text-base font-bold text-white flex items-center gap-2">
-                               {headPlayer.id === 'PROTOCOL_SEED' ? 'PROTOCOL SEED' : headPlayer.id.startsWith('JACKPOT') ? 'JACKPOT BOT' : headPlayer.id.startsWith('TAX') ? 'TAX BOT' : `User ${headPlayer.id.slice(0,6)}`}
+                               {headPlayer.id === 'PROTOCOL_SEED' ? 'PROTOCOL SEED' : headPlayer.id.startsWith('JACKPOT') ? 'JACKPOT BOT' : `User ${headPlayer.id.slice(0,6)}`}
                                {headPlayer.slashed && <Skull className="w-3.5 h-3.5 text-red-500 animate-pulse" />}
                             </div>
                           </div>
@@ -1052,7 +949,7 @@ const App: React.FC = () => {
                {/* Queue Visual */}
                <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 h-[400px] flex flex-col shadow-lg">
                   <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-emerald-500" /> Active Queue
+                    <Target className="w-4 h-4 text-emerald-500" /> Active Queue
                   </h2>
                   <div className="flex-grow overflow-hidden relative">
                     <div className="absolute inset-x-0 top-0 h-4 bg-gradient-to-b from-slate-900 to-transparent z-10 pointer-events-none"></div>

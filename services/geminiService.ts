@@ -1,3 +1,4 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { SimulationStats, DistributionStrategy } from "../types";
 
@@ -25,10 +26,10 @@ export const analyzeRisk = async (stats: SimulationStats, conceptDescription: st
       You are a senior DeFi Strategist and Tokenomics Auditor. Analyze the "x2gether" protocol simulation.
 
       Current Configuration:
-      - **Multiplier**: ${stats.multiplier}x (Base)
+      - **Multiplier**: ${stats.multiplier.toFixed(2)}x (Effective)
       - **Strategy**: ${isYield ? "COMMUNITY YIELD" : "STANDARD FIFO"}
       - **Guillotine**: ${stats.guillotineEnabled ? "ON" : "OFF"}
-      - **Elastic Strategy**: ${stats.elasticMultiplierEnabled ? "ON (Adjusts ROI based on queue length)" : "OFF"}
+      - **Target 100 Strategy**: ${stats.target100Enabled ? "ON (Adjusts ROI based on queue length)" : "OFF"}
       - **Winners Tax**: ${stats.winnersTaxEnabled ? "ON (20% fee on fast exits < 1hr)" : "OFF"}
       
       Simulation Snapshot:
@@ -38,7 +39,7 @@ export const analyzeRisk = async (stats: SimulationStats, conceptDescription: st
       - Exited Users: ${stats.usersPaidExit}
 
       Specific Analysis Questions:
-      1. **Elastic Strategy**: ${stats.elasticMultiplierEnabled ? "Is the dynamic multiplier adjustment effective at stabilizing the system?" : "Should they enable Elastic Strategy to prevent collapse?"}
+      1. **Target 100 Strategy**: ${stats.target100Enabled ? "Is the dynamic multiplier adjustment effective at stabilizing the system?" : "Should they enable the Target 100 Strategy to prevent collapse?"}
       2. **Winners Tax**: ${stats.winnersTaxEnabled ? "How much does the 20% fast-exit tax help the Reserve Vault? Is it too high?" : "Would a tax on winners help the midnight refund?"}
       3. **Solvency**: With the current Reserve of $${stats.protocolBalance.toFixed(0)}, can the Midnight Refund save the trapped users?
       4. **Verdict**: Give a risk score (1-10) and a brutally honest conclusion.

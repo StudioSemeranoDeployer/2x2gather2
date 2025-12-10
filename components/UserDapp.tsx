@@ -49,13 +49,8 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
 
   const currentMultiplier = stats.multiplier;
   const potentialReturn = parseFloat(amount || '0') * currentMultiplier;
+  const entryFeePercent = stats.config.feePercent * 100;
   
-  // Calculate Dynamic Fee: (Mult - 1) * 10
-  const feePercent = Math.max(0, (currentMultiplier - 1.0) * 10);
-  const estimatedProfit = potentialReturn - parseFloat(amount || '0');
-  const estimatedFee = estimatedProfit * (feePercent / 100);
-  const netReturn = potentialReturn - estimatedFee;
-
   return (
     <div className="h-full w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-8 p-4">
       
@@ -100,9 +95,9 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
                  </div>
               </div>
               <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800">
-                 <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Exit Fee</div>
-                 <div className="text-xl font-bold text-blue-400">
-                    {feePercent.toFixed(1)}% <span className="text-xs text-slate-600 font-normal">on profit</span>
+                 <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Entry Fee</div>
+                 <div className="text-xl font-bold text-slate-300">
+                    {entryFeePercent.toFixed(0)}% <span className="text-xs text-slate-600 font-normal">on deposit</span>
                  </div>
               </div>
            </div>
@@ -134,17 +129,13 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
 
               <div className="bg-slate-950/30 rounded-xl p-4 border border-slate-800/50 space-y-2">
                  <div className="flex justify-between items-center text-xs text-slate-500">
-                   <span>Gross Payout</span>
+                   <span>Target Return ({currentMultiplier.toFixed(2)}x)</span>
                    <span>${potentialReturn.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
                  </div>
-                 <div className="flex justify-between items-center text-xs text-blue-400/80">
-                   <span>Success Tax ({feePercent.toFixed(1)}%)</span>
-                   <span>-${estimatedFee.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
-                 </div>
                  <div className="border-t border-slate-800/50 pt-2 flex justify-between items-center">
-                   <span className="text-xs text-slate-400">Net Estimated</span>
+                   <span className="text-xs text-slate-400">Total Potential Payout</span>
                    <span className="text-lg font-bold text-emerald-400 flex items-center gap-1">
-                      ${netReturn.toLocaleString(undefined, {maximumFractionDigits: 2})}
+                      ${potentialReturn.toLocaleString(undefined, {maximumFractionDigits: 2})}
                       <Coins className="w-3.5 h-3.5 text-emerald-500/50" />
                    </span>
                  </div>

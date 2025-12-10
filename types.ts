@@ -12,12 +12,14 @@ export interface Player {
   isTaxTarget?: boolean; // True if selected for Winners Tax (1 in X)
   fastFilled?: boolean; // True if filled within 10 transactions
   isClientDeposit?: boolean; // Tracked for dApp
-  isUnlucky?: boolean; // True if hit by 10% break-even risk
+  isUnlucky?: boolean; // True if hit by break-even risk
+  isReinvest?: boolean; // True if this is an auto-compound entry
 }
 
 export enum DistributionStrategy {
   STANDARD = 'STANDARD', // 100% to Head
   COMMUNITY_YIELD = 'COMMUNITY_YIELD', // 80% to Head, 20% split among all in queue
+  INFINITY_LOOP = 'INFINITY_LOOP', // 100% Flush, Mandatory Reinvest
 }
 
 export interface SimulationConfig {
@@ -32,39 +34,26 @@ export interface SimulationConfig {
   winnersTaxEnabled: boolean;
   winnersTaxFrequency: number; // 1 in X users
 
-  // Dynamic Success Tax (Profit Fee based on Mult)
-  dynamicSuccessTaxEnabled: boolean;
-  
-  // 10% Break Even Risk
-  randomUnluckyEnabled: boolean;
+  // Break Even Risk (Slider 0-0.5)
+  breakEvenChance: number; 
 
   // Drip Config
   dailyDripRate: number;     // % of Vault to drip daily (0.01-1.0)
   
-  // Elastic Strategy Config
-  elasticMultiplierEnabled: boolean;
-  elasticMin: number;
-  elasticMax: number;
-
-  // Chaos Mode
-  chaosModeEnabled: boolean;
-  
-  // Random Decay Config (Legacy/Combo)
-  randomDecayEnabled: boolean;
-  randomDecayMin: number;
-  randomDecayMax: number;
-  randomDecayFrequency: number;
+  // Target 100 Strategy (Adaptive 1.2 - 2.0)
+  target100Enabled: boolean;
 
   initialReserve: number;    // Starting Vault Balance
   
-  // Tax Bot Config
-  taxBotEnabled: boolean;
-  taxBotFrequency: number;   // Every X users
-  taxBotAmount: number;      // Deposit Amount
-
   // Jackpot Config
   jackpotFrequency: number;  // Every X users
   jackpotAmount: number;     // Deposit Amount
+  
+  // Loop Config
+  reinvestRate: number;      // % Forced Reinvest
+  reverseYieldRate: number;  // % to Tail
+  
+  decayRate: number; // Legacy
 }
 
 export interface SimulationStats {
@@ -80,8 +69,7 @@ export interface SimulationStats {
   protocolBalance: number; // Tracks Reserve + Fees + Taxes
   jackpotBalance: number;  // Tracks profits from Jackpot Bots
   guillotineEnabled: boolean;
-  elasticMultiplierEnabled: boolean;
-  chaosModeEnabled: boolean;
+  target100Enabled: boolean;
   winnersTaxEnabled: boolean;
   config: SimulationConfig; // Added customizable config
   isAutoPaused?: boolean; // Track if paused by 30-day limit
