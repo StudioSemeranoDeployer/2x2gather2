@@ -11,6 +11,8 @@ export interface Player {
   isVip?: boolean;
   isTaxTarget?: boolean; // True if selected for Winners Tax (1 in X)
   fastFilled?: boolean; // True if filled within 10 transactions
+  isClientDeposit?: boolean; // Tracked for dApp
+  isUnlucky?: boolean; // True if hit by 10% break-even risk
 }
 
 export enum DistributionStrategy {
@@ -26,23 +28,32 @@ export interface SimulationConfig {
   guillotineThreshold: number; // Minimum deposit to be eligible for slash
   guillotineInterval: number; // How often it triggers (ticks)
 
-  // Winners Tax Config
-  winnersTaxRate: number;    // Tax on exits (0.05-0.50)
-  winnersTaxFrequency: number; // 1 in X users (e.g., 10)
+  // Winners Tax Config (Frequency Based)
+  winnersTaxEnabled: boolean;
+  winnersTaxFrequency: number; // 1 in X users
+
+  // Dynamic Success Tax (Profit Fee based on Mult)
+  dynamicSuccessTaxEnabled: boolean;
+  
+  // 10% Break Even Risk
+  randomUnluckyEnabled: boolean;
 
   // Drip Config
   dailyDripRate: number;     // % of Vault to drip daily (0.01-1.0)
   
-  // Decay Config (Linear)
-  decayRate: number;         // Multiplier reduction per 10 users
-  decayMinPercent: number;   // Min reduction % (e.g. 0.05)
-  decayMaxPercent: number;   // Max reduction % (e.g. 0.50)
+  // Elastic Strategy Config
+  elasticMultiplierEnabled: boolean;
+  elasticMin: number;
+  elasticMax: number;
+
+  // Chaos Mode
+  chaosModeEnabled: boolean;
   
-  // Random Decay Config
+  // Random Decay Config (Legacy/Combo)
   randomDecayEnabled: boolean;
   randomDecayMin: number;
   randomDecayMax: number;
-  randomDecayFrequency: number; // Change every X users
+  randomDecayFrequency: number;
 
   initialReserve: number;    // Starting Vault Balance
   
@@ -69,7 +80,8 @@ export interface SimulationStats {
   protocolBalance: number; // Tracks Reserve + Fees + Taxes
   jackpotBalance: number;  // Tracks profits from Jackpot Bots
   guillotineEnabled: boolean;
-  dynamicDecayEnabled: boolean;
+  elasticMultiplierEnabled: boolean;
+  chaosModeEnabled: boolean;
   winnersTaxEnabled: boolean;
   config: SimulationConfig; // Added customizable config
   isAutoPaused?: boolean; // Track if paused by 30-day limit

@@ -10,7 +10,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol"; // For Random Decay
+import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol"; 
 
 contract X2GetherProtocol is Ownable {
     
@@ -19,91 +19,101 @@ contract X2GetherProtocol is Ownable {
         uint256 deposit;    
         uint256 collected;  
         uint256 target;     
-        uint256 timestamp;
         uint256 multiplier;
-        bool slashed;
-        bool isTaxTarget;
+        bool isClient;
+        bool isUnlucky;
     }
 
     IERC20 public usdcToken;
     Player[] public queue;
-    uint256 public protocolVault; // Starts with Configured Initial Reserve
-    uint256 public jackpotBalance;
-    uint256 public totalUsers;
-    uint256 public constant MAX_DAYS = 30; // Auto-pause trigger
-    uint256 public deploymentTime;
     
-    // Config
-    uint256 public constant BASE_MULTIPLIER = 200; // 2.0x
-    uint256 public INITIAL_RESERVE = 30000 * 10**6;
-    
-    // Configurable Strategy Parameters
-    uint256 public WINNERS_TAX_FREQUENCY = 10; 
-    uint256 public WINNERS_TAX_RATE = 20; // 20%
-    
-    uint256 public GUILLOTINE_INTERVAL = 60; // Ticks
-    uint256 public GUILLOTINE_STRENGTH = 20; // 20%
-    uint256 public GUILLOTINE_THRESHOLD = 900 * 10**6; 
-    
-    uint256 public JACKPOT_FREQUENCY = 1000;
-    uint256 public JACKPOT_AMOUNT = 1000 * 10**6;
+    // Elastic Strategy
+    bool public elasticMode;
+    uint256 public elasticMin = 120; // 1.2x
+    uint256 public elasticMax = 250; // 2.5x
+    uint256 public currentElasticMult = 200;
 
-    bool public dynamicDecayEnabled;
-    bool public randomDecayEnabled; // New Feature
-    bool public winnersTaxEnabled;
-    bool public taxBotEnabled;
-    uint256 public taxBotFrequency; // e.g. 100
+    // Chaos Mode
+    bool public chaosMode;
     
-    // Random Decay
-    uint256 public randomDecayMin = 120; // 1.2x
-    uint256 public randomDecayMax = 250; // 2.5x
-    uint256 public currentRandomMultiplier = 200; 
+    // Dynamic Success Tax
+    bool public dynamicSuccessTax; // (Mult - 1.0) * 10%
+    
+    // Risk: 10% Break Even
+    bool public randomUnluckyEnabled;
 
-    event Deposit(address indexed user, uint256 amount, uint256 target);
-    event DailyDrip(uint256 amount);
-    event RandomMultiplierChange(uint256 newMult);
+    event Deposit(address indexed user, uint256 amount, uint256 multiplier);
+    event Payout(address indexed user, uint256 amount, uint256 taxPaid);
 
     constructor(address _usdcAddress) Ownable(msg.sender) {
         usdcToken = IERC20(_usdcAddress);
-        protocolVault = INITIAL_RESERVE;
-        deploymentTime = block.timestamp;
     }
 
     function deposit(uint256 amount) external {
-        require(block.timestamp < deploymentTime + 30 days, "Protocol Paused");
-        
-        // ... Transfer and Fee logic ...
-        totalUsers++;
-        uint256 mult = BASE_MULTIPLIER;
-        
-        // 1. Random Decay Logic
-        if (randomDecayEnabled) {
-             // Logic: Every X users, call Chainlink VRF or use block.prevrandao
-             // to set new currentRandomMultiplier between MIN and MAX
-             mult = currentRandomMultiplier;
-        } 
-        // 2. Dynamic Decay Logic (Min/Max Clamped)
-        else if (dynamicDecayEnabled) {
-             // Logic to reduce mult based on queue length
+        uint256 mult = 200; // Base 2.0x
+        bool isUnlucky = false;
+
+        // 1. RISK CHECK: 10% Break-Even
+        if (randomUnluckyEnabled) {
+            // Pseudo-random check (use VRF in production)
+            if ((uint256(keccak256(abi.encodePacked(block.timestamp, msg.sender))) % 100) < 10) {
+                mult = 100; // Force 1.0x
+                isUnlucky = true;
+            }
+        }
+
+        // 2. If not unlucky, calculate strategy multiplier
+        if (!isUnlucky) {
+            if (chaosMode) {
+                 // Randomly flip between Elastic and Random Logic
+                 if (block.prevrandao % 2 == 0) {
+                     mult = _getElasticMult();
+                 } else {
+                     mult = _getRandomMult(elasticMin, elasticMax);
+                 }
+            } else if (elasticMode) {
+                 mult = _getElasticMult();
+            }
         }
 
         uint256 target = (amount * mult) / 100;
+        queue.push(Player(msg.sender, amount, 0, target, mult, true, isUnlucky));
         
-        // ... Winners Tax Logic ...
+        emit Deposit(msg.sender, amount, mult);
+    }
 
-        queue.push(Player({
-            wallet: msg.sender,
-            deposit: amount,
-            collected: 0,
-            target: target,
-            timestamp: block.timestamp,
-            multiplier: mult,
-            slashed: false,
-            isTaxTarget: false // ...
-        }));
+    function _getElasticMult() internal returns (uint256) {
+        uint256 qLen = queue.length; // Simplified active count
+        // Breathing Logic
+        if (qLen < 20) {
+            if (currentElasticMult < elasticMax) currentElasticMult += 5;
+        } else if (qLen > 50) {
+            if (currentElasticMult > elasticMin) currentElasticMult -= 5;
+        }
+        return currentElasticMult;
+    }
+
+    function _processPayout(uint256 playerIndex, uint256 amount) internal {
+        Player storage p = queue[playerIndex];
+        // ... payout logic ...
         
-        // ... Bot Checks (Jackpot, Tax) ...
-        // ... Drip Checks ...
+        // Dynamic Success Fee Calculation on Exit
+        // NOTE: Unlucky users (1.0x) pay 0 tax because (1.0 - 1.0) = 0
+        if (p.collected >= p.target && dynamicSuccessTax) {
+             uint256 profit = p.target - p.deposit;
+             
+             if (profit > 0) {
+                 // Rate = (Multiplier - 1.0) * 0.10
+                 // e.g. 2.0x -> 10%, 1.5x -> 5%
+                 uint256 taxRate = (p.multiplier - 100) * 10; // Scaled
+                 uint256 tax = (profit * taxRate) / 10000;
+                 
+                 // Transfer Net to user, Tax to Vault
+                 emit Payout(p.wallet, p.target - tax, tax);
+             } else {
+                 emit Payout(p.wallet, p.target, 0);
+             }
+        }
     }
 }`;
 
@@ -122,7 +132,7 @@ contract X2GetherProtocol is Ownable {
           </div>
           <div>
             <h2 className="text-sm font-bold text-white uppercase tracking-wide">Solidity Contract</h2>
-            <span className="text-xs text-slate-400">Base Mainnet • v5.0 (Random + Configurable)</span>
+            <span className="text-xs text-slate-400">Base Mainnet • v6.0 (Elastic + Chaos)</span>
           </div>
         </div>
         <button 

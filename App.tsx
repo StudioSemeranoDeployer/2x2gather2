@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Player, SimulationStats, ChartDataPoint, SimulationStatus, DistributionStrategy, SimulationConfig } from './types';
 import { QueueVisualizer } from './components/QueueVisualizer';
@@ -5,7 +6,7 @@ import { StatsChart } from './components/StatsChart';
 import { SmartContractViewer } from './components/SmartContractViewer';
 import { UserDapp } from './components/UserDapp';
 import { analyzeRisk } from './services/geminiService';
-import { Play, Pause, RefreshCw, AlertTriangle, BarChart3, Bot, TrendingUp, TrendingDown, Settings, Users, ShieldCheck, Droplets, Sliders, Trophy, Crown, Skull, Ghost, Clock, Zap, Shuffle, Coins, Layers, Activity, Globe } from 'lucide-react';
+import { Play, Pause, RefreshCw, AlertTriangle, BarChart3, Bot, TrendingUp, TrendingDown, Settings, Users, ShieldCheck, Droplets, Sliders, Trophy, Crown, Skull, Ghost, Clock, Zap, Shuffle, Coins, Layers, Activity, Globe, Flame, ShieldAlert } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 
 const INITIAL_SEED_AMOUNT = 1000;
@@ -25,6 +26,8 @@ interface EngineState {
   tickCount: number; // For timers
   config: SimulationConfig; // Live config syncing
   currentRandomMultiplier: number; // Stores the current rolled value
+  currentElasticMultiplier: number; // Stores the breathing value
+  chaosModeActive: boolean; // Internal flag for random chaos bursts
 }
 
 const App: React.FC = () => {
@@ -37,7 +40,6 @@ const App: React.FC = () => {
   
   // Strategy Toggles
   const [guillotineEnabled, setGuillotineEnabled] = useState<boolean>(false);
-  const [dynamicDecayEnabled, setDynamicDecayEnabled] = useState<boolean>(false);
   const [winnersTaxEnabled, setWinnersTaxEnabled] = useState<boolean>(false);
 
   // Advanced Customizable Parameters
@@ -48,14 +50,20 @@ const App: React.FC = () => {
     guillotineThreshold: 900, // Deposits > 900
     guillotineInterval: 60,   // ~6 hours default
 
-    winnersTaxRate: 0.20,     // 20% tax
+    winnersTaxEnabled: false,
     winnersTaxFrequency: 10,  // 1 in 10
+
+    dynamicSuccessTaxEnabled: true, // New: Fee based on Mult
+    
+    randomUnluckyEnabled: false, // 10% break even risk
 
     dailyDripRate: 0.10,      // 10% daily drip default
     
-    decayRate: 0.05,          // 0.05x reduction per 10 users default
-    decayMinPercent: 0.05,    // Min 5% reduction
-    decayMaxPercent: 0.40,    // Max 40% reduction
+    elasticMultiplierEnabled: false,
+    elasticMin: 1.2,
+    elasticMax: 2.5,
+
+    chaosModeEnabled: false,
     
     randomDecayEnabled: false,
     randomDecayMin: 1.2,
@@ -83,6 +91,7 @@ const App: React.FC = () => {
     stats: SimulationStats;
     chartData: ChartDataPoint[];
     headPlayer: Player | null;
+    clientPositions: Player[];
   }>({
     queueSlice: [],
     stats: {
@@ -98,12 +107,14 @@ const App: React.FC = () => {
       protocolBalance: config.initialReserve,
       jackpotBalance: 0,
       guillotineEnabled: false,
-      dynamicDecayEnabled: false,
+      elasticMultiplierEnabled: false,
+      chaosModeEnabled: false,
       winnersTaxEnabled: false,
       config: config
     },
     chartData: [],
-    headPlayer: null
+    headPlayer: null,
+    clientPositions: []
   });
 
   // --- Engine (Mutable Ref - No Re-renders) ---
@@ -118,7 +129,8 @@ const App: React.FC = () => {
       slashed: false,
       multiplier: 2.0,
       isTaxTarget: false,
-      fastFilled: false
+      fastFilled: false,
+      isClientDeposit: false
     }],
     historyCount: 0,
     historySum: 0,
@@ -129,7 +141,9 @@ const App: React.FC = () => {
     chartData: [],
     tickCount: 0,
     config: config,
-    currentRandomMultiplier: 2.0
+    currentRandomMultiplier: 2.0,
+    currentElasticMultiplier: 2.0,
+    chaosModeActive: false
   });
 
   // Sync config changes to engine immediately
@@ -211,9 +225,11 @@ const App: React.FC = () => {
       entryRound: state.currentRound,
       timestamp: Date.now(),
       slashed: false,
-      multiplier: 2.0,
+      multiplier: 2.0, // Bots always get 2x
       isTaxTarget: false,
-      fastFilled: false
+      fastFilled: false,
+      isClientDeposit: false,
+      isUnlucky: false // Bots are never unlucky
     };
     
     state.totalDeposited += deposit;
@@ -221,7 +237,7 @@ const App: React.FC = () => {
   };
 
   // Helper: Process a single deposit logic
-  const processDeposit = (amount: number, isSystem: boolean = false) => {
+  const processDeposit = (amount: number, isSystem: boolean = false, isClient: boolean = false) => {
     const state = engine.current;
     state.tickCount++;
     
@@ -233,6 +249,12 @@ const App: React.FC = () => {
       triggerDailyDrip();
     }
     
+    // CHAOS MODE Ticker
+    if (state.config.chaosModeEnabled && state.tickCount % 50 === 0) {
+        // Toggle chaos state randomly
+        state.chaosModeActive = Math.random() > 0.5;
+    }
+
     // 1. Take Fee (if not system)
     let netAmount = amount;
     if (!isSystem) {
@@ -256,40 +278,62 @@ const App: React.FC = () => {
     // 3. Multiplier Calculation
     let effectiveMultiplier = multiplier;
 
-    // A. RANDOM DECAY (High Priority)
-    if (state.config.randomDecayEnabled && !isSystem) {
+    if (state.config.chaosModeEnabled && state.chaosModeActive) {
+        // CHAOS: Randomly spike or drop
+        const range = state.config.randomDecayMax - state.config.randomDecayMin;
+        effectiveMultiplier = state.config.randomDecayMin + (Math.random() * range);
+    } 
+    else if (state.config.elasticMultiplierEnabled) {
+        // ELASTIC STRATEGY
+        const qLen = state.queue.length;
+        let trend = 0;
+        
+        // Attraction Phase: Queue Short -> Increase ROI
+        if (qLen < 20) {
+            trend = 0.05; 
+        } 
+        // Protection Phase: Queue Long -> Decrease ROI
+        else if (qLen > 50) {
+            trend = -0.05;
+        }
+
+        // Apply Trend smoothly
+        state.currentElasticMultiplier += trend;
+        
+        // Clamp
+        if (state.currentElasticMultiplier > state.config.elasticMax) state.currentElasticMultiplier = state.config.elasticMax;
+        if (state.currentElasticMultiplier < state.config.elasticMin) state.currentElasticMultiplier = state.config.elasticMin;
+        
+        effectiveMultiplier = state.currentElasticMultiplier;
+    }
+    else if (state.config.randomDecayEnabled && !isSystem) {
+       // RANDOM LEGACY
        const totalUsers = state.historyCount + state.queue.length;
-       // Roll dice if frequency hit
        if (totalUsers > 0 && totalUsers % state.config.randomDecayFrequency === 0) {
           const range = state.config.randomDecayMax - state.config.randomDecayMin;
           state.currentRandomMultiplier = state.config.randomDecayMin + (Math.random() * range);
        }
-       // If first run, init
        if (state.currentRandomMultiplier === 0) state.currentRandomMultiplier = multiplier;
-       
        effectiveMultiplier = state.currentRandomMultiplier;
-    } 
-    // B. DYNAMIC DECAY (If Random is OFF)
-    else if (dynamicDecayEnabled && !isSystem) {
-      // Decay: Lose X for every 10 people in queue
-      const decayFactor = Math.floor(state.queue.length / 10) * state.config.decayRate;
-      const maxReduction = multiplier * state.config.decayMaxPercent;
-      const minReduction = multiplier * state.config.decayMinPercent;
-      
-      let actualReduction = decayFactor;
-      if (actualReduction > maxReduction) actualReduction = maxReduction;
-      if (actualReduction < minReduction && state.queue.length > 10) actualReduction = minReduction;
-
-      effectiveMultiplier = multiplier - actualReduction;
     }
 
-    // 4. Winners Tax Flagging (1 in X users)
+    // 4. "Unlucky 10%" Risk Check (Never Less)
+    let isUnlucky = false;
+    if (state.config.randomUnluckyEnabled && !isSystem) {
+        // 10% Chance
+        if (Math.random() < 0.10) {
+            isUnlucky = true;
+            effectiveMultiplier = 1.0; // Force break-even
+        }
+    }
+
+    // 5. Winners Tax Flagging (1 in X users) - Legacy setting override by Dynamic
     const currentTotalUsers = state.historyCount + state.queue.length + 1;
     const isTaxTarget = winnersTaxEnabled && !isSystem && (currentTotalUsers % state.config.winnersTaxFrequency === 0);
 
-    // 5. Create Player
+    // 6. Create Player
     const newPlayer: Player = {
-      id: isSystem ? 'PROTOCOL_SEED' : uuidv4(),
+      id: isSystem ? 'PROTOCOL_SEED' : isClient ? `CLIENT_${uuidv4()}` : uuidv4(),
       deposit: amount,
       target: amount * effectiveMultiplier,
       collected: 0,
@@ -298,10 +342,12 @@ const App: React.FC = () => {
       slashed: false,
       multiplier: effectiveMultiplier,
       isTaxTarget: isTaxTarget,
-      fastFilled: false
+      fastFilled: false,
+      isClientDeposit: isClient,
+      isUnlucky: isUnlucky
     };
 
-    // 6. Distribute Yield (Drip)
+    // 7. Distribute Yield (Drip)
     if (yieldPool > 0 && state.queue.length > 0) {
       const yieldShare = yieldPool / state.queue.length;
       for (const p of state.queue) {
@@ -309,7 +355,7 @@ const App: React.FC = () => {
       }
     }
 
-    // 7. Distribute to Head (FIFO)
+    // 8. Distribute to Head (FIFO)
     let remaining = headPool;
     for (const p of state.queue) {
       if (remaining <= 0) break;
@@ -325,7 +371,7 @@ const App: React.FC = () => {
       }
     }
 
-    // 8. Add new player
+    // 9. Add new player
     state.queue.push(newPlayer);
 
     // --- CHECK FOR BOT INJECTIONS ---
@@ -341,28 +387,33 @@ const App: React.FC = () => {
       injectBot('TAX');
     }
 
-    // 9. Cleanup Sweep (Remove fully paid)
+    // 10. Cleanup Sweep (Remove fully paid)
     const nextQueue: Player[] = [];
 
     for (const p of state.queue) {
       if (p.collected >= p.target - 0.01) {
         p.collected = p.target; // Visual clean
+        const profit = p.collected - p.deposit;
         
         // --- SPECIAL EXIT LOGIC ---
         if (p.id === 'PROTOCOL_SEED') {
             state.protocolBalance += p.collected;
         } else if (p.id.startsWith('JACKPOT_BOT')) {
-            const profit = p.collected - p.deposit;
             state.jackpotBalance += profit;
         } else if (p.id.startsWith('TAX_BOT')) {
-            const profit = p.collected - p.deposit;
             state.protocolBalance += profit; // Tax Bot profit goes to Reserve
         } else {
-            // Normal User Logic - Winners Tax (Frequency Based)
-            if (p.isTaxTarget) {
-               const profit = p.collected - p.deposit;
+            // DYNAMIC SUCCESS TAX: Fee based on Multiplier
+            if (state.config.dynamicSuccessTaxEnabled && !p.isUnlucky) {
+                // If lucky/normal, pay tax on profit
+                const taxRate = Math.max(0, (p.multiplier - 1.0) * 0.10);
+                const taxAmount = profit * taxRate;
+                state.protocolBalance += taxAmount;
+            } 
+            // Legacy Tax Fallback
+            else if (p.isTaxTarget && !p.isUnlucky) {
                if (profit > 0) {
-                 const tax = profit * state.config.winnersTaxRate; 
+                 const tax = profit * 0.20; // Fixed 20% legacy
                  state.protocolBalance += tax;
                }
             }
@@ -381,7 +432,7 @@ const App: React.FC = () => {
     state.queue = nextQueue;
     state.currentRound++; 
 
-    // 10. Update Chart Data
+    // 11. Update Chart Data
     const liability = state.queue.reduce((acc, p) => acc + (p.target - p.collected), 0);
     state.chartData.push({
       round: state.totalDeposited,
@@ -404,7 +455,9 @@ const App: React.FC = () => {
         slashed: false,
         multiplier: 2.0,
         isTaxTarget: false,
-        fastFilled: false
+        fastFilled: false,
+        isClientDeposit: false,
+        isUnlucky: false
       }],
       historyCount: 0,
       historySum: 0,
@@ -415,7 +468,9 @@ const App: React.FC = () => {
       chartData: [],
       tickCount: 0,
       config: config,
-      currentRandomMultiplier: 2.0
+      currentRandomMultiplier: 2.0,
+      currentElasticMultiplier: 2.0,
+      chaosModeActive: false
     };
     syncUI();
   };
@@ -425,12 +480,18 @@ const App: React.FC = () => {
     const state = engine.current;
     
     // Determine effective multiplier for display purposes
-    const effectiveDisplayMultiplier = state.config.randomDecayEnabled 
-      ? state.currentRandomMultiplier 
-      : multiplier;
+    let effectiveDisplayMultiplier = multiplier;
+    if (state.config.chaosModeEnabled && state.chaosModeActive) {
+        effectiveDisplayMultiplier = state.currentElasticMultiplier; // Just show one state
+    } else if (state.config.elasticMultiplierEnabled) {
+        effectiveDisplayMultiplier = state.currentElasticMultiplier;
+    } else if (state.config.randomDecayEnabled) {
+        effectiveDisplayMultiplier = state.currentRandomMultiplier;
+    }
 
     setUiSnapshot({
       queueSlice: state.queue.slice(0, 8),
+      clientPositions: state.queue.filter(p => p.isClientDeposit),
       stats: {
         totalDeposited: state.totalDeposited,
         totalPaidOut: state.historySum,
@@ -440,11 +501,12 @@ const App: React.FC = () => {
         currentQueueLength: state.queue.length,
         currentRound: state.currentRound,
         strategy,
-        multiplier: effectiveDisplayMultiplier, // Use effective for display
+        multiplier: effectiveDisplayMultiplier, 
         protocolBalance: state.protocolBalance,
         jackpotBalance: state.jackpotBalance,
         guillotineEnabled,
-        dynamicDecayEnabled,
+        elasticMultiplierEnabled: state.config.elasticMultiplierEnabled,
+        chaosModeEnabled: state.config.chaosModeEnabled,
         winnersTaxEnabled,
         config: state.config,
         isAutoPaused: state.tickCount >= AUTO_PAUSE_TICKS
@@ -452,7 +514,7 @@ const App: React.FC = () => {
       chartData: [...state.chartData], 
       headPlayer: state.queue[0] || null
     });
-  }, [strategy, multiplier, guillotineEnabled, dynamicDecayEnabled, winnersTaxEnabled, config]);
+  }, [strategy, multiplier, guillotineEnabled, winnersTaxEnabled, config]);
 
   // --- Timers ---
   useEffect(() => {
@@ -475,7 +537,7 @@ const App: React.FC = () => {
     }, 100); 
 
     return () => clearInterval(timer);
-  }, [status, strategy, multiplier, guillotineEnabled, dynamicDecayEnabled, winnersTaxEnabled]);
+  }, [status, strategy, multiplier, guillotineEnabled, winnersTaxEnabled]);
 
   const handleManualDeposit = () => {
     processDeposit(manualDepositAmount);
@@ -483,7 +545,7 @@ const App: React.FC = () => {
   };
 
   const handleDappDeposit = (amt: number) => {
-    processDeposit(amt);
+    processDeposit(amt, false, true); // true for isClient
     syncUI();
   };
 
@@ -494,15 +556,11 @@ const App: React.FC = () => {
     }
     setIsAnalyzing(true);
     const concept = `
-      Protocol with ${multiplier}x Base Multiplier.
-      Strategy: ${strategy}.
-      Options: 
-      - Guillotine: ${guillotineEnabled}
-      - Winners Tax: ${winnersTaxEnabled}
-      - Random Decay: ${config.randomDecayEnabled} (${config.randomDecayMin}x - ${config.randomDecayMax}x every ${config.randomDecayFrequency} users)
-      - Entry Fee: ${config.feePercent * 100}%
-      - Daily Drip Rate: ${config.dailyDripRate * 100}%
-      Reserve: ${uiSnapshot.stats.protocolBalance.toFixed(2)} available.
+      Protocol with ${uiSnapshot.stats.multiplier.toFixed(2)}x Current Multiplier.
+      Elastic Strategy: ${config.elasticMultiplierEnabled}.
+      Chaos Mode: ${config.chaosModeEnabled}.
+      Dynamic Success Fee: ON.
+      Reserve: ${uiSnapshot.stats.protocolBalance.toFixed(2)}.
     `;
     const result = await analyzeRisk(uiSnapshot.stats, concept);
     setAnalysis(result);
@@ -532,7 +590,7 @@ const App: React.FC = () => {
                 x2gether <span className="text-emerald-500">Protocol</span>
               </h1>
               <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
-                <span className="bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-400 font-mono">v5.0-RANDOM</span>
+                <span className="bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-400 font-mono">v6.0-ELASTIC</span>
                 <span>•</span>
                 <span className="flex items-center gap-1"><ShieldCheck className="w-3 h-3 text-blue-500"/> Audited Simulation</span>
               </div>
@@ -621,7 +679,7 @@ const App: React.FC = () => {
                    </button>
                    <button onClick={() => setSettingsTab('economy')} className={`relative flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${settingsTab === 'economy' ? 'text-white border-b-2 border-emerald-500 bg-slate-800' : 'text-slate-500 hover:text-slate-300'}`}>
                       Econ 
-                      {(config.randomDecayEnabled || dynamicDecayEnabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>}
+                      {(config.elasticMultiplierEnabled || config.chaosModeEnabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>}
                    </button>
                    <button onClick={() => setSettingsTab('bots')} className={`relative flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${settingsTab === 'bots' ? 'text-white border-b-2 border-emerald-500 bg-slate-800' : 'text-slate-500 hover:text-slate-300'}`}>
                       Bots
@@ -629,7 +687,7 @@ const App: React.FC = () => {
                    </button>
                    <button onClick={() => setSettingsTab('risks')} className={`relative flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${settingsTab === 'risks' ? 'text-white border-b-2 border-emerald-500 bg-slate-800' : 'text-slate-500 hover:text-slate-300'}`}>
                       Risks
-                      {(guillotineEnabled || winnersTaxEnabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full"></span>}
+                      {(guillotineEnabled || winnersTaxEnabled || config.randomUnluckyEnabled) && <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full"></span>}
                    </button>
                 </div>
 
@@ -684,72 +742,72 @@ const App: React.FC = () => {
                   {settingsTab === 'economy' && (
                     <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
                        
-                       {/* Base Multiplier */}
-                       <div className="p-4 rounded-xl border border-slate-800 bg-slate-950/50">
-                          <label className="flex justify-between text-xs text-slate-400 mb-2 uppercase font-bold">
-                            Base Multiplier <span className="text-white font-mono">{multiplier}x</span>
-                          </label>
-                          <input 
-                            type="range" min="1.1" max="3.0" step="0.1"
-                            value={multiplier}
-                            onChange={(e) => { setMultiplier(parseFloat(e.target.value)); handleFullReset(); }}
-                            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-white"
-                          />
-                       </div>
-
-                       {/* Random Decay Option */}
-                       <div className={`p-4 rounded-xl border transition-all ${config.randomDecayEnabled ? 'bg-indigo-950/20 border-indigo-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
+                       {/* Chaos Mode */}
+                       <div className={`p-4 rounded-xl border transition-all ${config.chaosModeEnabled ? 'bg-pink-950/20 border-pink-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
                           <div className="flex items-center justify-between mb-3">
                              <div className="flex items-center gap-2">
-                                <Shuffle className={`w-4 h-4 ${config.randomDecayEnabled ? 'text-indigo-400' : 'text-slate-500'}`} />
-                                <span className={`text-xs font-bold uppercase ${config.randomDecayEnabled ? 'text-indigo-400' : 'text-slate-500'}`}>Random Decay</span>
+                                <Flame className={`w-4 h-4 ${config.chaosModeEnabled ? 'text-pink-400' : 'text-slate-500'}`} />
+                                <span className={`text-xs font-bold uppercase ${config.chaosModeEnabled ? 'text-pink-400' : 'text-slate-500'}`}>Chaos Mode</span>
                              </div>
                              <button 
-                               onClick={() => setConfig({...config, randomDecayEnabled: !config.randomDecayEnabled})}
-                               className={`w-9 h-5 rounded-full relative transition-colors ${config.randomDecayEnabled ? 'bg-indigo-600' : 'bg-slate-700'}`}
+                               onClick={() => setConfig({...config, chaosModeEnabled: !config.chaosModeEnabled})}
+                               className={`w-9 h-5 rounded-full relative transition-colors ${config.chaosModeEnabled ? 'bg-pink-600' : 'bg-slate-700'}`}
                              >
-                               <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.randomDecayEnabled ? '20px' : '4px'}}></div>
+                               <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.chaosModeEnabled ? '20px' : '4px'}}></div>
+                             </button>
+                          </div>
+                          {config.chaosModeEnabled && <p className="text-[10px] text-pink-300 italic">Randomly blending Elastic & Random strategies.</p>}
+                       </div>
+
+                       {/* Elastic Multiplier */}
+                       <div className={`p-4 rounded-xl border transition-all ${config.elasticMultiplierEnabled ? 'bg-cyan-950/20 border-cyan-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
+                          <div className="flex items-center justify-between mb-3">
+                             <div className="flex items-center gap-2">
+                                <Activity className={`w-4 h-4 ${config.elasticMultiplierEnabled ? 'text-cyan-400' : 'text-slate-500'}`} />
+                                <span className={`text-xs font-bold uppercase ${config.elasticMultiplierEnabled ? 'text-cyan-400' : 'text-slate-500'}`}>Elastic Multiplier</span>
+                             </div>
+                             <button 
+                               onClick={() => setConfig({...config, elasticMultiplierEnabled: !config.elasticMultiplierEnabled})}
+                               className={`w-9 h-5 rounded-full relative transition-colors ${config.elasticMultiplierEnabled ? 'bg-cyan-600' : 'bg-slate-700'}`}
+                             >
+                               <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.elasticMultiplierEnabled ? '20px' : '4px'}}></div>
                              </button>
                           </div>
                           
-                          {config.randomDecayEnabled && (
-                            <div className="space-y-4 pt-2 border-t border-indigo-900/30 mt-2">
+                          {config.elasticMultiplierEnabled && (
+                            <div className="space-y-4 pt-2 border-t border-cyan-900/30 mt-2">
                                <div className="flex gap-2">
                                  <div className="flex-1">
-                                    <div className="text-[9px] text-slate-500 mb-1 uppercase">Min Multiplier</div>
-                                    <input type="number" step="0.1" value={config.randomDecayMin} onChange={(e) => setConfig({...config, randomDecayMin: parseFloat(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-xs text-center font-mono" />
+                                    <div className="text-[9px] text-slate-500 mb-1 uppercase">Min Breathing</div>
+                                    <input type="number" step="0.1" value={config.elasticMin} onChange={(e) => setConfig({...config, elasticMin: parseFloat(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-xs text-center font-mono" />
                                  </div>
                                  <div className="flex-1">
-                                    <div className="text-[9px] text-slate-500 mb-1 uppercase">Max Multiplier</div>
-                                    <input type="number" step="0.1" value={config.randomDecayMax} onChange={(e) => setConfig({...config, randomDecayMax: parseFloat(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-xs text-center font-mono" />
+                                    <div className="text-[9px] text-slate-500 mb-1 uppercase">Max Breathing</div>
+                                    <input type="number" step="0.1" value={config.elasticMax} onChange={(e) => setConfig({...config, elasticMax: parseFloat(e.target.value)})} className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-xs text-center font-mono" />
                                  </div>
                                </div>
-                               <div>
-                                  <div className="flex justify-between text-[9px] text-slate-500 mb-1 uppercase">Change Frequency (Users)</div>
-                                  <input type="range" min="1" max="100" value={config.randomDecayFrequency} onChange={(e) => setConfig({...config, randomDecayFrequency: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded appearance-none cursor-pointer accent-indigo-500" />
-                                  <div className="text-right text-[9px] text-indigo-400 mt-1">Every {config.randomDecayFrequency} users</div>
-                               </div>
+                               <div className="text-[10px] text-cyan-300 italic">Adapts to queue length automatically.</div>
                             </div>
                           )}
                        </div>
 
-                       {/* Linear Decay */}
-                       <div className={`p-4 rounded-xl border transition-all ${dynamicDecayEnabled && !config.randomDecayEnabled ? 'bg-orange-950/20 border-orange-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
-                          <div className="flex items-center justify-between mb-2">
-                             <div className="flex items-center gap-2">
-                                <TrendingDown className={`w-4 h-4 ${dynamicDecayEnabled ? 'text-orange-400' : 'text-slate-500'}`} />
-                                <span className={`text-xs font-bold uppercase ${dynamicDecayEnabled ? 'text-orange-400' : 'text-slate-500'}`}>Linear Decay</span>
-                             </div>
-                             <button 
-                               onClick={() => setDynamicDecayEnabled(!dynamicDecayEnabled)}
-                               disabled={config.randomDecayEnabled}
-                               className={`w-9 h-5 rounded-full relative transition-colors ${dynamicDecayEnabled && !config.randomDecayEnabled ? 'bg-orange-600' : 'bg-slate-700 opacity-50'}`}
-                             >
-                               <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: dynamicDecayEnabled && !config.randomDecayEnabled ? '20px' : '4px'}}></div>
-                             </button>
+                       {/* Legacy Controls (Hidden if Elastic or Chaos on) */}
+                       {!config.elasticMultiplierEnabled && !config.chaosModeEnabled && (
+                          <div className="opacity-70 grayscale">
+                            <div className="p-4 rounded-xl border border-slate-800 bg-slate-950/50 mb-4">
+                               <label className="flex justify-between text-xs text-slate-400 mb-2 uppercase font-bold">
+                                 Fixed Multiplier <span className="text-white font-mono">{multiplier}x</span>
+                               </label>
+                               <input 
+                                 type="range" min="1.1" max="3.0" step="0.1"
+                                 value={multiplier}
+                                 onChange={(e) => { setMultiplier(parseFloat(e.target.value)); handleFullReset(); }}
+                                 className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-white"
+                               />
+                            </div>
+                            <div className="text-[10px] text-center text-slate-600">Enable Elastic or Chaos for advanced strategies</div>
                           </div>
-                          {config.randomDecayEnabled && <p className="text-[10px] text-red-400 italic">Disabled: Random Decay is Active</p>}
-                       </div>
+                       )}
 
                     </div>
                   )}
@@ -811,6 +869,25 @@ const App: React.FC = () => {
                   {/* RISKS TAB */}
                   {settingsTab === 'risks' && (
                      <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                        
+                        {/* 10% Unlucky Risk */}
+                        <div className={`p-4 rounded-xl border transition-all ${config.randomUnluckyEnabled ? 'bg-slate-100/10 border-slate-400/40' : 'bg-slate-950/50 border-slate-800'}`}>
+                           <div className="flex items-center justify-between mb-3">
+                              <div className="flex items-center gap-2">
+                                 <ShieldAlert className={`w-4 h-4 ${config.randomUnluckyEnabled ? 'text-slate-200' : 'text-slate-500'}`} />
+                                 <span className={`text-xs font-bold uppercase ${config.randomUnluckyEnabled ? 'text-slate-200' : 'text-slate-500'}`}>10% Break-Even Risk</span>
+                              </div>
+                              <button onClick={() => setConfig({...config, randomUnluckyEnabled: !config.randomUnluckyEnabled})} className={`w-9 h-5 rounded-full relative transition-colors ${config.randomUnluckyEnabled ? 'bg-slate-200' : 'bg-slate-700'}`}>
+                                 <div className={`absolute top-1 w-3 h-3 bg-slate-900 rounded-full transition-transform`} style={{left: config.randomUnluckyEnabled ? '20px' : '4px'}}></div>
+                              </button>
+                           </div>
+                           {config.randomUnluckyEnabled && (
+                              <div className="text-[10px] text-slate-400 pt-2 border-t border-slate-700/50">
+                                 10% of new users randomly get a 1.0x multiplier (Break Even Only).
+                              </div>
+                           )}
+                        </div>
+
                         {/* Guillotine */}
                         <div className={`p-4 rounded-xl border transition-all ${guillotineEnabled ? 'bg-red-950/20 border-red-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
                            <div className="flex items-center justify-between mb-3">
@@ -844,30 +921,19 @@ const App: React.FC = () => {
                         </div>
 
                         {/* Winners Tax */}
-                        <div className={`p-4 rounded-xl border transition-all ${winnersTaxEnabled ? 'bg-blue-950/20 border-blue-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
+                        <div className={`p-4 rounded-xl border transition-all ${config.dynamicSuccessTaxEnabled ? 'bg-blue-950/20 border-blue-500/40' : 'bg-slate-950/50 border-slate-800'}`}>
                            <div className="flex items-center justify-between mb-3">
                               <div className="flex items-center gap-2">
-                                 <Crown className={`w-4 h-4 ${winnersTaxEnabled ? 'text-blue-400' : 'text-slate-500'}`} />
-                                 <span className={`text-xs font-bold uppercase ${winnersTaxEnabled ? 'text-blue-400' : 'text-slate-500'}`}>Winners Tax</span>
+                                 <Crown className={`w-4 h-4 ${config.dynamicSuccessTaxEnabled ? 'text-blue-400' : 'text-slate-500'}`} />
+                                 <span className={`text-xs font-bold uppercase ${config.dynamicSuccessTaxEnabled ? 'text-blue-400' : 'text-slate-500'}`}>Dynamic Success Tax</span>
                               </div>
-                              <button onClick={() => setWinnersTaxEnabled(!winnersTaxEnabled)} className={`w-9 h-5 rounded-full relative transition-colors ${winnersTaxEnabled ? 'bg-blue-600' : 'bg-slate-700'}`}>
-                                 <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: winnersTaxEnabled ? '20px' : '4px'}}></div>
+                              <button onClick={() => setConfig({...config, dynamicSuccessTaxEnabled: !config.dynamicSuccessTaxEnabled})} className={`w-9 h-5 rounded-full relative transition-colors ${config.dynamicSuccessTaxEnabled ? 'bg-blue-600' : 'bg-slate-700'}`}>
+                                 <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-transform`} style={{left: config.dynamicSuccessTaxEnabled ? '20px' : '4px'}}></div>
                               </button>
                            </div>
-                           {winnersTaxEnabled && (
-                              <div className="space-y-3 pt-2 border-t border-blue-900/30">
-                                 <div>
-                                    <span className="text-[9px] text-slate-500 uppercase">Frequency (1 in X Users)</span>
-                                    <input type="range" min="2" max="50" step="1" value={config.winnersTaxFrequency} onChange={(e) => setConfig({...config, winnersTaxFrequency: parseInt(e.target.value)})} className="w-full h-1 bg-slate-800 rounded accent-blue-500" />
-                                    <div className="text-right text-[10px] text-blue-400 font-mono">1 in {config.winnersTaxFrequency}</div>
-                                 </div>
-                                 <div>
-                                    <span className="text-[9px] text-slate-500 uppercase">Tax Rate %</span>
-                                    <input type="range" min="5" max="50" step="5" value={config.winnersTaxRate * 100} onChange={(e) => setConfig({...config, winnersTaxRate: parseFloat(e.target.value)/100})} className="w-full h-1 bg-slate-800 rounded accent-blue-500" />
-                                    <div className="text-right text-[10px] text-blue-400 font-mono">{(config.winnersTaxRate * 100).toFixed(0)}%</div>
-                                 </div>
-                              </div>
-                           )}
+                           <div className="text-[10px] text-slate-400">
+                             Fee calculated based on Multiplier: <span className="text-blue-300 font-mono">(Mult - 1) * 10%</span>
+                           </div>
                         </div>
                      </div>
                   )}
@@ -1043,7 +1109,12 @@ const App: React.FC = () => {
           </div>
         ) : activeTab === 'dapp' ? (
           <div className="flex justify-center h-[calc(100vh-150px)]">
-             <UserDapp stats={stats} onDeposit={handleDappDeposit} isProcessing={status === SimulationStatus.RUNNING} />
+             <UserDapp 
+               stats={stats} 
+               onDeposit={handleDappDeposit} 
+               isProcessing={status === SimulationStatus.RUNNING} 
+               myPositions={uiSnapshot.clientPositions}
+             />
           </div>
         ) : (
           <SmartContractViewer />
