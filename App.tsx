@@ -1,11 +1,11 @@
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Player, SimulationStats, ChartDataPoint, SimulationStatus, DistributionStrategy, SimulationConfig } from './types';
 import { QueueVisualizer } from './components/QueueVisualizer';
 import { StatsChart } from './components/StatsChart';
 import { SmartContractViewer } from './components/SmartContractViewer';
+import { UserDapp } from './components/UserDapp';
 import { analyzeRisk } from './services/geminiService';
-import { Play, Pause, RefreshCw, AlertTriangle, BarChart3, Bot, TrendingUp, TrendingDown, Settings, Users, ShieldCheck, Droplets, Sliders, Trophy, Crown, Skull, Ghost, Clock, Zap, Shuffle, Coins, Layers, Activity } from 'lucide-react';
+import { Play, Pause, RefreshCw, AlertTriangle, BarChart3, Bot, TrendingUp, TrendingDown, Settings, Users, ShieldCheck, Droplets, Sliders, Trophy, Crown, Skull, Ghost, Clock, Zap, Shuffle, Coins, Layers, Activity, Globe } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 
 const INITIAL_SEED_AMOUNT = 1000;
@@ -29,7 +29,7 @@ interface EngineState {
 
 const App: React.FC = () => {
   // --- UI State (Synced periodically) ---
-  const [activeTab, setActiveTab] = useState<'simulation' | 'contract'>('simulation');
+  const [activeTab, setActiveTab] = useState<'simulation' | 'contract' | 'dapp'>('simulation');
   const [settingsTab, setSettingsTab] = useState<'core' | 'economy' | 'bots' | 'risks'>('core');
   
   const [multiplier, setMultiplier] = useState<number>(2.0);
@@ -424,6 +424,11 @@ const App: React.FC = () => {
   const syncUI = useCallback(() => {
     const state = engine.current;
     
+    // Determine effective multiplier for display purposes
+    const effectiveDisplayMultiplier = state.config.randomDecayEnabled 
+      ? state.currentRandomMultiplier 
+      : multiplier;
+
     setUiSnapshot({
       queueSlice: state.queue.slice(0, 8),
       stats: {
@@ -435,7 +440,7 @@ const App: React.FC = () => {
         currentQueueLength: state.queue.length,
         currentRound: state.currentRound,
         strategy,
-        multiplier,
+        multiplier: effectiveDisplayMultiplier, // Use effective for display
         protocolBalance: state.protocolBalance,
         jackpotBalance: state.jackpotBalance,
         guillotineEnabled,
@@ -474,6 +479,11 @@ const App: React.FC = () => {
 
   const handleManualDeposit = () => {
     processDeposit(manualDepositAmount);
+    syncUI();
+  };
+
+  const handleDappDeposit = (amt: number) => {
+    processDeposit(amt);
     syncUI();
   };
 
@@ -529,7 +539,7 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex bg-slate-900/80 p-1 rounded-xl border border-slate-800">
+          <div className="flex bg-slate-900/80 p-1 rounded-xl border border-slate-800 overflow-x-auto">
             <button 
               onClick={() => setActiveTab('simulation')}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === 'simulation' ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
@@ -541,6 +551,12 @@ const App: React.FC = () => {
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${activeTab === 'contract' ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
             >
               <Settings className="w-4 h-4" /> Contract
+            </button>
+            <button 
+              onClick={() => setActiveTab('dapp')}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${activeTab === 'dapp' ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
+            >
+              <Globe className="w-4 h-4" /> Client App
             </button>
           </div>
         </header>
@@ -1024,6 +1040,10 @@ const App: React.FC = () => {
 
             </div>
 
+          </div>
+        ) : activeTab === 'dapp' ? (
+          <div className="flex justify-center h-[calc(100vh-150px)]">
+             <UserDapp stats={stats} onDeposit={handleDappDeposit} isProcessing={status === SimulationStatus.RUNNING} />
           </div>
         ) : (
           <SmartContractViewer />
