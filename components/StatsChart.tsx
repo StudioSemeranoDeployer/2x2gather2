@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { ChartDataPoint } from '../types';
@@ -8,7 +9,7 @@ interface StatsChartProps {
 
 export const StatsChart: React.FC<StatsChartProps> = ({ data }) => {
   return (
-    <div style={{ width: '100%', height: '250px', minHeight: '250px' }}>
+    <div className="w-full h-[250px] min-w-0">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart
           data={data}
@@ -39,20 +40,22 @@ export const StatsChart: React.FC<StatsChartProps> = ({ data }) => {
           <Area 
             type="monotone" 
             dataKey="requiredNewLiquidity" 
-            name="Debt (Required to Pay All)" 
+            name="Debt Liability" 
             stackId="1" 
             stroke="#ef4444" 
             fill="#ef4444" 
             fillOpacity={0.2} 
+            isAnimationActive={false}
           />
           <Area 
             type="monotone" 
-            dataKey="usersTrapped" 
-            name="Users Waiting" 
+            dataKey="protocolReserves" 
+            name="Protocol Reserves" 
             stackId="2" 
-            stroke="#f59e0b" 
-            fill="#f59e0b" 
-            fillOpacity={0.1} 
+            stroke="#10b981" 
+            fill="#10b981" 
+            fillOpacity={0.3} 
+            isAnimationActive={false}
           />
         </AreaChart>
       </ResponsiveContainer>

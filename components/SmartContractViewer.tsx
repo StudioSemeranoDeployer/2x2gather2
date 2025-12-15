@@ -21,67 +21,93 @@ contract X2GetherProtocol is Ownable {
         uint256 multiplier;
         bool isClient;
         bool isUnlucky;
-        bool isReinvest;
     }
 
     IERC20 public usdcToken;
     Player[] public queue;
     
-    // Target 100 Adaptive Strategy
-    bool public target100Enabled = true;
-    uint256 public currentAdaptiveMult = 200; // 2.0x
-    uint256 public constant MIN_MULT = 120;   // 1.2x
-    uint256 public constant MAX_MULT = 200;   // 2.0x
+    // Core Config
+    uint256 public entryFeePercent = 50; // 5.0%
+    uint256 public constant MAX_DEPOSIT = 1000 * 10**6; 
+    uint256 public constant MAX_TX_PER_ROUND = 1000;
+    uint256 public txCount;
 
-    // Break Even Risk
-    uint256 public breakEvenProbability; // e.g. 50 = 50%
+    // Round Logic
+    uint256 public roundExpiry;
+    address public lastDepositor;
+    uint256 public jackpotPool;
+    bool public roundActive;
+
+    // Emergency Exit Config
+    uint256 public constant EXIT_PENALTY = 20; // 20%
 
     event Deposit(address indexed user, uint256 amount, uint256 multiplier);
-    event Payout(address indexed user, uint256 amount);
+    event EmergencyExit(address indexed user, uint256 refundAmount);
+    event RoundEnded(address winner, uint256 jackpot);
 
     constructor(address _usdcAddress) Ownable(msg.sender) {
         usdcToken = IERC20(_usdcAddress);
+        roundExpiry = block.timestamp + 24 hours;
+        roundActive = true;
     }
 
     function deposit(uint256 amount) external {
-        uint256 mult = 200; // Base
-        bool isUnlucky = false;
+        require(roundActive, "Round ended");
+        require(txCount < MAX_TX_PER_ROUND, "Tx limit reached");
+        require(amount <= MAX_DEPOSIT, "Max deposit 1000 USDC");
+        require(block.timestamp < roundExpiry, "Time expired");
 
-        // 1. RISK CHECK: Break-Even Slider
-        // Pseudo-random (Use Chainlink VRF in prod)
-        if ((uint256(keccak256(abi.encodePacked(block.timestamp, msg.sender))) % 100) < breakEvenProbability) {
-            mult = 100; // Force 1.0x
-            isUnlucky = true;
+        // ROUND LOGIC
+        txCount++;
+        if (txCount >= MAX_TX_PER_ROUND) {
+             _triggerRoundEnd();
+             return;
         }
 
-        // 2. If not unlucky, calculate adaptive multiplier
-        if (!isUnlucky && target100Enabled) {
-            mult = _getAdaptiveMult();
+        // EXTEND TIMER
+        roundExpiry += 10 minutes;
+        if(roundExpiry > block.timestamp + 24 hours) {
+            roundExpiry = block.timestamp + 24 hours;
         }
+        lastDepositor = msg.sender;
 
+        // ... Multiplier Logic ...
+        uint256 mult = 200; 
+        
+        uint256 totalFee = (amount * entryFeePercent) / 1000;
+        jackpotPool += totalFee / 2;
+        
+        uint256 netAmount = amount - totalFee;
         uint256 target = (amount * mult) / 100;
-        queue.push(Player(msg.sender, amount, 0, target, mult, true, isUnlucky, false));
         
-        emit Deposit(msg.sender, amount, mult);
+        queue.push(Player(msg.sender, amount, 0, target, mult, true, false));
+        _distribute(netAmount);
     }
 
-    function _getAdaptiveMult() internal returns (uint256) {
-        uint256 qLen = queue.length; // Active count
-        
-        // Target 100 Logic
-        if (qLen < 100) {
-            // Drift Up to attract users
-            if (currentAdaptiveMult < MAX_MULT) currentAdaptiveMult += 1;
-        } else if (qLen > 100) {
-            // Drift Down to clear debt
-            if (currentAdaptiveMult > MIN_MULT) currentAdaptiveMult -= 1;
-        }
-        return currentAdaptiveMult;
-    }
+    function emergencyExit(uint256 index) external {
+        Player storage p = queue[index];
+        require(p.wallet == msg.sender, "Not owner");
+        require(p.collected < p.deposit, "Already profitable");
 
-    function setBreakEvenProbability(uint256 _percent) external onlyOwner {
-        require(_percent <= 50, "Max 50%");
-        breakEvenProbability = _percent;
+        // 20% Penalty stays in contract to pay others
+        uint256 penalty = (p.deposit * EXIT_PENALTY) / 100;
+        uint256 refund = p.deposit - penalty;
+
+        usdcToken.transfer(msg.sender, refund);
+        
+        // Remove from queue logic (swap and pop or shift)
+        delete queue[index]; 
+        emit EmergencyExit(msg.sender, refund);
+    }
+    
+    function _triggerRoundEnd() internal {
+        roundActive = false;
+        // Pay Jackpot
+        uint256 prize = jackpotPool / 2;
+        usdcToken.transfer(lastDepositor, prize);
+        
+        // Midnight Refund Logic
+        // ... Distribute remaining balance ...
     }
 }`;
 
@@ -100,7 +126,7 @@ contract X2GetherProtocol is Ownable {
           </div>
           <div>
             <h2 className="text-sm font-bold text-white uppercase tracking-wide">Solidity Contract</h2>
-            <span className="text-xs text-slate-400">Base Mainnet • v7.0 (Target 100)</span>
+            <span className="text-xs text-slate-400">Base Mainnet • v9.5 (Sustainable)</span>
           </div>
         </div>
         <button 

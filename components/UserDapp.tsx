@@ -1,21 +1,39 @@
 
 import React, { useState, useEffect } from 'react';
-import { Wallet, ArrowRight, ShieldCheck, Zap, TrendingUp, Lock, Coins, LogOut, CheckCircle2, List, Percent, ShieldAlert } from 'lucide-react';
+import { Wallet, ArrowRight, ShieldCheck, Zap, TrendingUp, Lock, Coins, LogOut, CheckCircle2, List, Percent, ShieldAlert, Clock, Trophy, AlertTriangle } from 'lucide-react';
 import { SimulationStats, Player } from '../types';
 
 interface UserDappProps {
   stats: SimulationStats;
   onDeposit: (amount: number) => void;
+  onWithdraw?: (id: string) => void;
   isProcessing?: boolean;
   myPositions?: Player[];
 }
 
-export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessing = false, myPositions = [] }) => {
+export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, onWithdraw, isProcessing = false, myPositions = [] }) => {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [address, setAddress] = useState<string>('');
   const [amount, setAmount] = useState<string>('100');
   const [userBalance, setUserBalance] = useState<number>(5000);
   const [txHash, setTxHash] = useState<string | null>(null);
+  const [timeLeft, setTimeLeft] = useState<string>('24:00:00');
+
+  useEffect(() => {
+     const timer = setInterval(() => {
+         if (!stats.roundActive) {
+             setTimeLeft("00:00:00");
+             return;
+         }
+         const now = Date.now();
+         const diff = Math.max(0, stats.roundExpiry - now);
+         const hours = Math.floor(diff / 3600000);
+         const minutes = Math.floor((diff % 3600000) / 60000);
+         const seconds = Math.floor((diff % 60000) / 1000);
+         setTimeLeft(`${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
+     }, 1000);
+     return () => clearInterval(timer);
+  }, [stats.roundExpiry, stats.roundActive]);
 
   const handleConnect = () => {
     // Simulate wallet connection delay
@@ -37,6 +55,7 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
     const val = parseFloat(amount);
     if (isNaN(val) || val <= 0) return;
     if (val > userBalance) return;
+    if (val > stats.config.maxDepositLimit) return; // Cap check
 
     setUserBalance(prev => prev - val);
     onDeposit(val);
@@ -49,8 +68,10 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
 
   const currentMultiplier = stats.multiplier;
   const potentialReturn = parseFloat(amount || '0') * currentMultiplier;
-  const entryFeePercent = stats.config.feePercent * 100;
   
+  // Last Depositor check
+  const amILastDepositor = isConnected && stats.lastDepositorId && myPositions.some(p => p.id === stats.lastDepositorId);
+
   return (
     <div className="h-full w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-8 p-4">
       
@@ -85,7 +106,24 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
               </button>
             )}
           </div>
-           
+
+           {/* FOMO TIMER */}
+           <div className={`mb-6 p-4 rounded-2xl border flex items-center justify-between ${stats.roundActive ? 'bg-slate-950/50 border-slate-700' : 'bg-red-950/20 border-red-500/50'}`}>
+                <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-lg ${stats.roundActive ? 'bg-slate-800' : 'bg-red-500/20'}`}>
+                        <Clock className={`w-5 h-5 ${stats.roundActive ? 'text-emerald-400' : 'text-red-500'}`} />
+                    </div>
+                    <div>
+                        <div className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Round Ends In</div>
+                        <div className={`text-xl font-mono font-bold ${stats.roundActive ? 'text-white' : 'text-red-400'}`}>{timeLeft}</div>
+                    </div>
+                </div>
+                <div className="text-right">
+                    <div className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">Potential Jackpot</div>
+                    <div className="text-xl font-mono font-bold text-amber-400">${(stats.jackpotBalance * 0.5).toLocaleString()}</div>
+                </div>
+           </div>
+
            {/* Stats Row */}
            <div className="grid grid-cols-2 gap-4 mb-6">
               <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800">
@@ -95,9 +133,9 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
                  </div>
               </div>
               <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800">
-                 <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Entry Fee</div>
+                 <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Max Deposit</div>
                  <div className="text-xl font-bold text-slate-300">
-                    {entryFeePercent.toFixed(0)}% <span className="text-xs text-slate-600 font-normal">on deposit</span>
+                    ${stats.config.maxDepositLimit} <span className="text-xs text-slate-600 font-normal">USDC</span>
                  </div>
               </div>
            </div>
@@ -114,7 +152,8 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
                        type="number" 
                        value={amount}
                        onChange={(e) => setAmount(e.target.value)}
-                       disabled={!isConnected}
+                       disabled={!isConnected || !stats.roundActive}
+                       max={stats.config.maxDepositLimit}
                        className="w-full bg-slate-950 border border-slate-700 rounded-2xl p-4 text-2xl font-bold text-white placeholder-slate-700 outline-none focus:border-emerald-500/50 transition-all disabled:opacity-50"
                        placeholder="0.00"
                     />
@@ -125,6 +164,9 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
                        </div>
                     </div>
                  </div>
+                 {parseFloat(amount) > stats.config.maxDepositLimit && (
+                     <div className="text-xs text-red-400 mt-1 pl-1">Max deposit is ${stats.config.maxDepositLimit}</div>
+                 )}
               </div>
 
               <div className="bg-slate-950/30 rounded-xl p-4 border border-slate-800/50 space-y-2">
@@ -145,14 +187,17 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
            {/* Action Button */}
            <button
               onClick={handleDeposit}
-              disabled={!isConnected || parseFloat(amount) <= 0 || parseFloat(amount) > userBalance}
-              className={`w-full py-4 rounded-2xl font-bold text-lg transition-all transform active:scale-[0.98] shadow-lg ${
+              disabled={!isConnected || parseFloat(amount) <= 0 || parseFloat(amount) > userBalance || parseFloat(amount) > stats.config.maxDepositLimit || !stats.roundActive}
+              className={`w-full py-4 rounded-2xl font-bold text-lg transition-all transform active:scale-[0.98] shadow-lg flex flex-col items-center justify-center ${
                  !isConnected 
                     ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700' 
-                    : 'bg-emerald-500 hover:bg-emerald-400 text-slate-900 shadow-emerald-500/20'
+                    : !stats.roundActive 
+                      ? 'bg-slate-800 text-red-500 border border-red-900/50 cursor-not-allowed'
+                      : 'bg-emerald-500 hover:bg-emerald-400 text-slate-900 shadow-emerald-500/20'
               }`}
            >
-              {!isConnected ? 'Connect Wallet First' : 'Deposit USDC'}
+              {!isConnected ? 'Connect Wallet First' : !stats.roundActive ? 'Round Ended' : 'Deposit USDC'}
+              {stats.roundActive && isConnected && <span className="text-[10px] font-normal opacity-70">+10 Minutes to Timer</span>}
            </button>
            
            {/* Success Toast */}
@@ -170,10 +215,17 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
 
       {/* RIGHT: My Positions */}
       <div className="flex flex-col h-full bg-slate-900/50 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
-         <div className="flex items-center gap-2 mb-6">
-            <List className="w-5 h-5 text-emerald-400" />
-            <h2 className="font-bold text-white text-lg">My Active Positions</h2>
-            <span className="bg-slate-800 text-slate-400 text-xs px-2 py-0.5 rounded-full">{myPositions.length}</span>
+         <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-2">
+                <List className="w-5 h-5 text-emerald-400" />
+                <h2 className="font-bold text-white text-lg">My Positions</h2>
+                <span className="bg-slate-800 text-slate-400 text-xs px-2 py-0.5 rounded-full">{myPositions.length}</span>
+            </div>
+            {amILastDepositor && stats.roundActive && (
+                <div className="bg-amber-500/20 text-amber-500 px-3 py-1 rounded-lg border border-amber-500/30 text-xs font-bold animate-pulse flex items-center gap-2">
+                    <Trophy className="w-3 h-3" /> YOU ARE WINNING
+                </div>
+            )}
          </div>
          
          {!isConnected ? (
@@ -199,7 +251,7 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
                            <div className={`h-full transition-all duration-500 ${p.isUnlucky ? 'bg-slate-500' : 'bg-emerald-500'}`} style={{ width: `${progress}%` }}></div>
                         </div>
 
-                        <div className="flex justify-between items-start mb-2">
+                        <div className="flex justify-between items-start mb-2 relative z-10">
                            <div>
                               <div className="text-[10px] text-slate-500 uppercase font-mono mb-0.5">ID: {p.id.slice(0,8)}...</div>
                               <div className="font-bold text-white flex items-center gap-2">
@@ -207,21 +259,38 @@ export const UserDapp: React.FC<UserDappProps> = ({ stats, onDeposit, isProcessi
                                  <span className={`text-xs font-normal px-1.5 py-0.5 rounded border ${p.isUnlucky ? 'bg-slate-800 text-slate-300 border-slate-600' : 'text-slate-400 bg-slate-900 border-slate-800'}`}>
                                     x{p.multiplier.toFixed(2)}
                                  </span>
-                                 {p.isUnlucky && <ShieldAlert className="w-3 h-3 text-slate-500" title="Break Even Risk Hit" />}
+                                 {p.isUnlucky && (
+                                    <span title="Break Even Risk Hit" className="flex items-center">
+                                       <ShieldAlert className="w-3 h-3 text-slate-500" />
+                                    </span>
+                                 )}
                               </div>
                            </div>
                            <div className="text-right">
-                              <div className="text-[10px] text-slate-500 uppercase font-mono mb-0.5">{p.isUnlucky ? 'REFUND' : 'PAYOUT'}</div>
-                              <div className={`font-bold ${p.isUnlucky ? 'text-slate-300' : 'text-emerald-400'}`}>
+                              <div className="text-[10px] text-slate-500 uppercase font-mono mb-0.5">{p.isUnlucky ? 'REFUND' : p.exitReason === 'JACKPOT_WIN' ? 'JACKPOT WIN' : 'PAYOUT'}</div>
+                              <div className={`font-bold ${p.isUnlucky ? 'text-slate-300' : p.exitReason === 'JACKPOT_WIN' ? 'text-amber-400' : 'text-emerald-400'}`}>
                                  ${p.collected.toFixed(2)} <span className="text-slate-600 text-xs">/ ${p.target.toFixed(0)}</span>
                               </div>
                            </div>
                         </div>
                         
                         {p.fastFilled && (
-                           <div className="absolute top-2 right-2">
+                           <div className="absolute top-2 right-2 z-10">
                               <Zap className="w-3 h-3 text-yellow-500 animate-pulse" />
                            </div>
+                        )}
+
+                        {/* Emergency Withdraw Button */}
+                        {!p.exitRound && stats.roundActive && (
+                            <div className="relative z-10 mt-3 pt-3 border-t border-slate-800/50 flex justify-end">
+                                <button 
+                                    onClick={() => onWithdraw && onWithdraw(p.id)}
+                                    className="flex items-center gap-1.5 text-[10px] font-bold text-red-400 hover:text-red-300 bg-red-950/20 hover:bg-red-950/40 px-3 py-1.5 rounded border border-red-900/50 transition-colors"
+                                >
+                                    <AlertTriangle className="w-3 h-3" />
+                                    Emergency Exit (-20%)
+                                </button>
+                            </div>
                         )}
                      </div>
                   );

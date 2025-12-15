@@ -5,43 +5,55 @@ export interface Player {
   target: number; // The x2 amount
   collected: number;
   entryRound: number;
+  exitRound?: number; // When they finished
   timestamp: number;
-  slashed?: boolean; // True if hit by Guillotine
+  slashed?: boolean; // True if hit by generic penalty
   multiplier: number; // The specific multiplier at entry
   isVip?: boolean;
-  isTaxTarget?: boolean; // True if selected for Winners Tax (1 in X)
-  fastFilled?: boolean; // True if filled within 10 transactions
+  isTaxTarget?: boolean;
+  fastFilled?: boolean; 
   isClientDeposit?: boolean; // Tracked for dApp
   isUnlucky?: boolean; // True if hit by break-even risk
   isReinvest?: boolean; // True if this is an auto-compound entry
+  exitReason?: 'PAID' | 'REFUND' | 'SLASHED' | 'JACKPOT_WIN' | 'EARLY_EXIT';
+  netProfit?: number;
 }
 
 export enum DistributionStrategy {
-  STANDARD = 'STANDARD', // 100% to Head
-  COMMUNITY_YIELD = 'COMMUNITY_YIELD', // 80% to Head, 20% split among all in queue
+  STANDARD = 'STANDARD', // Legacy (Now controlled by yieldSplit)
   INFINITY_LOOP = 'INFINITY_LOOP', // 100% Flush, Mandatory Reinvest
 }
 
+export interface RoundLog {
+  roundNumber: number;
+  finalBalance: number;
+  totalVolume: number;
+  winnerId?: string;
+  timestamp: number;
+  reason: 'TIMER' | 'CAP_REACHED';
+}
+
 export interface SimulationConfig {
-  feePercent: number;        // Entry Fee (0-0.10)
+  feePercent: number;        // Entry Fee (0-0.20)
   
-  // Guillotine Config
-  guillotineStrength: number; // How much to slash (0.05-0.50)
-  guillotineThreshold: number; // Minimum deposit to be eligible for slash
-  guillotineInterval: number; // How often it triggers (ticks)
+  // Single Customizable Penalty
+  penaltyEnabled: boolean;
+  penaltyThreshold: number; // Min deposit to trigger
+  penaltyRate: number;      // % to slash or tax
+  penaltyType: 'ENTRY' | 'EXIT'; 
 
-  // Winners Tax Config (Frequency Based)
-  winnersTaxEnabled: boolean;
-  winnersTaxFrequency: number; // 1 in X users
-
-  // Break Even Risk (Slider 0-0.5)
+  // Break Even Risk
   breakEvenChance: number; 
 
   // Drip Config
-  dailyDripRate: number;     // % of Vault to drip daily (0.01-1.0)
+  dailyDripRate: number;     // % of Vault to drip daily
   
-  // Target 100 Strategy (Adaptive 1.2 - 2.0)
-  target100Enabled: boolean;
+  // Yield Strategy
+  yieldSplit: number;        // 0 = 100% Head
+
+  // Strategies
+  target100Enabled: boolean; // Adaptive Target 100
+  decayStrategyEnabled: boolean; // Queue-based Decay
 
   initialReserve: number;    // Starting Vault Balance
   
@@ -53,7 +65,12 @@ export interface SimulationConfig {
   reinvestRate: number;      // % Forced Reinvest
   reverseYieldRate: number;  // % to Tail
   
-  decayRate: number; // Legacy
+  decayRate: number; // Per user decay amount
+  
+  // Sustainability
+  maxDepositLimit: number; // 1000 USDC Cap
+  maxTransactions: number; // 1000 Tx Cap per day
+  roundDurationSeconds: number; // Initial time
 }
 
 export interface SimulationStats {
@@ -68,22 +85,34 @@ export interface SimulationStats {
   multiplier: number;
   protocolBalance: number; // Tracks Reserve + Fees + Taxes
   jackpotBalance: number;  // Tracks profits from Jackpot Bots
-  guillotineEnabled: boolean;
   target100Enabled: boolean;
-  winnersTaxEnabled: boolean;
-  config: SimulationConfig; // Added customizable config
-  isAutoPaused?: boolean; // Track if paused by 30-day limit
+  config: SimulationConfig; 
+  isAutoPaused?: boolean; 
+  
+  // Mathematical Indicators
+  healthFactor: number; // Reserve / Liability
+  currentExitPenalty: number; // Dynamic penalty for emergency exit
+
+  // Timer & Round Stats
+  roundExpiry: number; // Timestamp
+  lastDepositorId: string | null;
+  roundActive: boolean;
+  transactionsInCurrentRound: number;
+  
+  roundHistory: RoundLog[];
 }
 
 export interface ChartDataPoint {
   round: number;
   usersTrapped: number;
   requiredNewLiquidity: number;
+  protocolReserves: number;
 }
 
 export enum SimulationStatus {
   IDLE = 'IDLE',
   RUNNING = 'RUNNING',
   PAUSED = 'PAUSED',
-  COMPLETED = 'COMPLETED', // Added for 30-day stop
+  COMPLETED = 'COMPLETED',
+  ROUND_ENDED = 'ROUND_ENDED'
 }
